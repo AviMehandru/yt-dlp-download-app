@@ -73,7 +73,7 @@ function Write-Warn {
     $Warnings.Add($Message) | Out-Null
 }
 
-$RepoRaw = "https://raw.githubusercontent.com/AviMehandru/ytdl-gui/main"
+$RepoRaw = "https://raw.githubusercontent.com/AviMehandru/yt-dlp-download-app/main"
 
 # Every file the app is built from. Keep in sync with the repo tree; a
 # file missing here simply is not fetched in the no-checkout mode, and the
