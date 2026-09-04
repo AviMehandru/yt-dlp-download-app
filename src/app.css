@@ -178,6 +178,25 @@ button:disabled { opacity: .45; cursor: default; }
 }
 @media (max-width: 820px) { .opt-grid { grid-template-columns: 1fr; } }
 
+/* Section heading inside the options panel. The panel grew three groups
+   with the content options and reads as an undifferentiated wall without
+   them. */
+.opt-head {
+  margin: 20px 0 0; padding-top: 16px;
+  border-top: 1px solid var(--line);
+  font-size: 12px; font-weight: 600; letter-spacing: .04em;
+  text-transform: uppercase; color: var(--dim);
+}
+
+/* A control the current --mode makes meaningless. Disabled by
+   applyModeConstraints() rather than hidden, so the option stays visible
+   and its absence is explained by the warning line instead of the control
+   silently vanishing. */
+.field.dim .label, .field.dim select { opacity: .45; }
+.field.dim select { cursor: not-allowed; }
+
+.opts textarea { resize: vertical; min-height: 62px; font-family: var(--mono); font-size: 12px; }
+
 .cmd-row {
   display: flex; align-items: center; gap: 14px; margin-top: 16px;
   padding-top: 14px; border-top: 1px solid var(--line);

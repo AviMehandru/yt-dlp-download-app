@@ -83,6 +83,84 @@
         </div>
         <p class="warn" id="workers-warn" hidden>Every worker hits YouTube at the same time, and this
           pipeline's pacing was tuned for one stream. Start at 2&ndash;4 and watch the log for 403s.</p>
+
+        <h4 class="opt-head">What to download</h4>
+        <div class="opt-grid">
+          <label class="field inline"><span class="label">--mode</span>
+            <select id="opt-mode">
+              <option value="full">full &mdash; video + audio, everything else</option>
+              <option value="video-only">video-only &mdash; no audio stream</option>
+              <option value="audio-only">audio-only &mdash; no video stream</option>
+              <option value="metadata-only">metadata-only &mdash; no media</option>
+              <option value="comments-only">comments-only &mdash; no media</option>
+              <option value="subs-only">subs-only &mdash; no media</option>
+            </select></label>
+
+          <label class="field inline"><span class="label">--quality</span>
+            <select id="opt-quality">
+              <option value="best">best available</option>
+              <option value="2160">2160p and below</option>
+              <option value="1440">1440p and below</option>
+              <option value="1080">1080p and below</option>
+              <option value="720">720p and below</option>
+              <option value="480">480p and below</option>
+              <option value="360">360p and below</option>
+            </select></label>
+
+          <label class="field inline"><span class="label">--codec</span>
+            <select id="opt-codec">
+              <option value="any">any &mdash; whatever is best</option>
+              <option value="avc1">avc1 &mdash; plays anywhere</option>
+              <option value="vp9">vp9</option>
+              <option value="av01">av01 &mdash; smallest for the quality</option>
+            </select></label>
+
+          <label class="field inline"><span class="label">--container</span>
+            <select id="opt-container">
+              <option value="mkv">mkv &mdash; archival, keeps attachments</option>
+              <option value="mp4">mp4 &mdash; most compatible</option>
+              <option value="webm">webm</option>
+            </select></label>
+
+          <label class="field inline" id="row-audiocodec"><span class="label">--audio-codec</span>
+            <select id="opt-audiocodec">
+              <option value="any">any &mdash; keep the original stream</option>
+              <option value="opus">opus (re-encodes)</option>
+              <option value="aac">aac (re-encodes)</option>
+              <option value="mp3">mp3 (re-encodes)</option>
+              <option value="flac">flac (re-encodes, larger)</option>
+            </select></label>
+        </div>
+
+        <h4 class="opt-head">Leave components out</h4>
+        <div class="opt-grid">
+          <label class="check"><input type="checkbox" id="opt-nocomments" /><span>
+            <b>--no-comments</b> skip the comments pass
+            <i>Normally the longest stage of a download &mdash; 30&ndash;60+ minutes on a
+              popular video.</i></span></label>
+
+          <label class="check"><input type="checkbox" id="opt-nosubs" /><span>
+            <b>--no-subs</b> download no subtitles</span></label>
+
+          <label class="check"><input type="checkbox" id="opt-nothumbnail" /><span>
+            <b>--no-thumbnail</b> download and embed no thumbnail</span></label>
+
+          <label class="check"><input type="checkbox" id="opt-nometadata" /><span>
+            <b>--no-metadata</b> write no description or info.json
+            <i>The manifest falls back to folder-name metadata, which the pipeline
+              handles.</i></span></label>
+        </div>
+
+        <label class="field"><span class="label">--ytdlp-arg &mdash; one argument per line</span>
+          <textarea id="opt-ytdlpargs" rows="3" spellcheck="false"
+            placeholder="--sponsorblock-mark&#10;all"></textarea></label>
+        <p class="hint">Passed straight to yt-dlp, after the config file so they win. One per line
+          rather than space-separated, because a real <code>--match-filter</code> expression contains
+          spaces and commas. Arguments that would redirect where files are written
+          (<code>-o</code>, <code>--paths</code>, <code>--exec</code>, <code>--download-archive</code>)
+          are refused by the pipeline.</p>
+
+        <p class="warn" id="mode-warn" hidden></p>
       </details>
 
       <div class="cmd-row">

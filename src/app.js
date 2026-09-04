@@ -116,7 +116,71 @@ function readOptions() {
     no_pot: $("#opt-nopot").checked,
     skip_pot_update: $("#opt-skippot").checked,
     pot_port: n("#opt-potport"),
+
+    /* Content options. Sent as the plain strings the pipeline's own flags
+     * take -- no format selector is built here, and nothing in this file
+     * knows that audio-only writes "Final Audio". All of that lives in
+     * run_ytdlp.ps1 on the far side of the CLI_VERSION pin, so changing
+     * what a mode means is a pipeline change this window inherits without
+     * a release of its own. */
+    mode: $("#opt-mode").value,
+    quality: $("#opt-quality").value,
+    codec: $("#opt-codec").value,
+    audio_codec: $("#opt-audiocodec").value,
+    container: $("#opt-container").value,
+    no_comments: $("#opt-nocomments").checked,
+    no_subs: $("#opt-nosubs").checked,
+    no_thumbnail: $("#opt-nothumbnail").checked,
+    no_metadata: $("#opt-nometadata").checked,
+    /* One argument per line, not split on spaces: a real --match-filter
+     * expression contains spaces and commas, so any separator that looked
+     * convenient here would corrupt it. */
+    ytdlp_args: $("#opt-ytdlpargs").value
+      .split("\n").map((s) => s.trim()).filter((s) => s !== ""),
   };
+}
+
+/* The modes that download no media. Kept in step with $noMediaModes in
+ * ytdl.ps1 -- and, deliberately, only used to disable controls, never to
+ * decide what gets downloaded. */
+const NO_MEDIA_MODES = ["metadata-only", "comments-only", "subs-only"];
+
+/* Grey out the options a mode makes meaningless, and say why.
+ *
+ * ytdl.ps1 rejects these combinations outright, which is the right
+ * behaviour for a typed command line. Reproducing the REJECTION here would
+ * mean a second copy of the rule; disabling the control instead means the
+ * window cannot build a command the pipeline would refuse, and the
+ * pipeline stays the only place the rule is written down. */
+function applyModeConstraints() {
+  const mode = $("#opt-mode").value;
+  const noMedia = NO_MEDIA_MODES.includes(mode);
+
+  for (const sel of ["#opt-quality", "#opt-codec", "#opt-container"]) {
+    $(sel).disabled = noMedia;
+    $(sel).closest("label").classList.toggle("dim", noMedia);
+  }
+  const audioOnly = mode === "audio-only";
+  $("#opt-audiocodec").disabled = !audioOnly;
+  $("#row-audiocodec").classList.toggle("dim", !audioOnly);
+
+  /* The two skips that would make their own mode fetch nothing at all. */
+  const selfDefeating =
+    (mode === "comments-only" && $("#opt-nocomments").checked) ||
+    (mode === "subs-only" && $("#opt-nosubs").checked);
+
+  const warn = $("#mode-warn");
+  if (selfDefeating) {
+    warn.textContent =
+      `--mode ${mode} together with that skip would fetch nothing at all. The pipeline refuses this combination.`;
+    warn.hidden = false;
+  } else if (noMedia) {
+    warn.textContent =
+      `--mode ${mode} downloads no media. The per-video folder is still written in full — manifest, checksums, subfolders — with no media file in it, so the media can be filled in by a later run.`;
+    warn.hidden = false;
+  } else {
+    warn.hidden = true;
+  }
 }
 
 let previewTimer = null;
@@ -140,6 +204,23 @@ async function updatePreview() {
   if (workers > 1) active.push(`--workers ${workers}`);
   if (opts.data_root) active.push("--path");
   if (opts.no_pot) active.push("--no-pot");
+
+  applyModeConstraints();
+  /* Only non-defaults are summarised, so an ordinary download still reads
+   * "defaults" rather than listing four options that change nothing. */
+  if (opts.mode !== "full") active.push(`--mode ${opts.mode}`);
+  if (opts.quality !== "best") active.push(`--quality ${opts.quality}`);
+  if (opts.codec !== "any") active.push(`--codec ${opts.codec}`);
+  if (opts.container !== "mkv") active.push(`--container ${opts.container}`);
+  if (opts.mode === "audio-only" && opts.audio_codec !== "any") {
+    active.push(`--audio-codec ${opts.audio_codec}`);
+  }
+  if (opts.no_comments) active.push("--no-comments");
+  if (opts.no_subs) active.push("--no-subs");
+  if (opts.no_thumbnail) active.push("--no-thumbnail");
+  if (opts.no_metadata) active.push("--no-metadata");
+  if (opts.ytdlp_args.length) active.push(`--ytdlp-arg ×${opts.ytdlp_args.length}`);
+
   $("#opt-summary").textContent = active.length ? active.join("  ") : "defaults";
   try {
     $("#cmd-preview").textContent = await invoke("command_preview", { opts });
@@ -148,10 +229,17 @@ async function updatePreview() {
   }
 }
 
-["#url", "#opt-items", "#opt-after", "#opt-workers", "#opt-path", "#opt-potport"]
+["#url", "#opt-items", "#opt-after", "#opt-workers", "#opt-path", "#opt-potport",
+ "#opt-ytdlpargs"]
   .forEach((s) => $(s).addEventListener("input", schedulePreview));
-["#opt-sync", "#opt-lazy", "#opt-nopot", "#opt-skippot"]
+["#opt-sync", "#opt-lazy", "#opt-nopot", "#opt-skippot",
+ "#opt-mode", "#opt-quality", "#opt-codec", "#opt-audiocodec", "#opt-container",
+ "#opt-nocomments", "#opt-nosubs", "#opt-nothumbnail", "#opt-nometadata"]
   .forEach((s) => $(s).addEventListener("change", schedulePreview));
+
+/* Run once at load so a disabled control is disabled before the first
+ * interaction rather than after it. */
+applyModeConstraints();
 
 $("#url").addEventListener("keydown", (e) => {
   if (e.key === "Enter") start();

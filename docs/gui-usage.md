@@ -130,12 +130,40 @@ the platform it targets; there is no cross-compilation here.
 
 ### Download
 
-URL, options, and the command preview. The options are exactly `ytdl.ps1`'s:
-`--sync`, `--items`, `--after`, `--lazy`, `--workers`, `--path`, `--no-pot`,
-`--skip-pot-update`, `--pot-port`. Each carries the same caveat it has in
-`docs/ytdl-usage.md` — `--sync` is only safe for newest-first listings,
+URL, options, and the command preview. The options are exactly `ytdl.ps1`'s,
+in three groups.
+
+**Session** — `--sync`, `--items`, `--after`, `--lazy`, `--workers`, `--path`,
+`--no-pot`, `--skip-pot-update`, `--pot-port`. Each carries the same caveat it
+has in `docs/ytdl-usage.md`: `--sync` is only safe for newest-first listings,
 `--lazy` does nothing when workers > 1, and raising workers multiplies your
 aggregate request rate at YouTube.
+
+**What to download** — `--mode`, `--quality`, `--codec`, `--container`, and
+`--audio-codec`. `--mode audio-only` writes `Final Audio.<ext>` instead of
+`Final Video.<ext>`; the metadata-only, comments-only and subs-only modes
+download no media at all and still write the complete per-video folder around
+it. `--codec` is a preference, not a filter — a video that offers no `avc1`
+rendition still downloads.
+
+**Leaving components out** — `--no-comments`, `--no-subs`, `--no-thumbnail`,
+`--no-metadata`, plus the `--no-audio` / `--no-video` aliases for the two
+single-stream modes. Below them, a box for raw `--ytdlp-arg` values, one per
+line (one per line rather than space-separated because a real
+`--match-filter` expression contains spaces and commas).
+
+Options a mode makes meaningless are greyed out rather than hidden, with a
+line saying why — `--quality` against `--mode comments-only`, for instance.
+The window disables them rather than reproducing the pipeline's rejection
+rules, so those rules stay written down in exactly one place: `ytdl.ps1`
+refuses the combination if one reaches it anyway, and the error appears in the
+run log like any other pipeline error.
+
+Nothing in this window builds a yt-dlp format selector or knows that
+`Final Audio` exists. Each control maps to one `ytdl` flag and the meaning
+lives in `run_ytdlp.ps1`, on the far side of the `CLI_VERSION` pin — so
+changing what a mode means is a pipeline change this window inherits without a
+release of its own.
 
 Below it, live output. yt-dlp redraws its progress line with a carriage return
 and `yt-dlp.conf` sets no `--newline`, so the app reads the child's output

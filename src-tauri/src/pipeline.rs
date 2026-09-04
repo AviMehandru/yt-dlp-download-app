@@ -63,6 +63,48 @@ pub struct RunOptions {
     pub skip_pot_update: bool,
     #[serde(default)]
     pub pot_port: Option<u16>,
+
+    // --- What to download (pipeline archive layout 2) ---
+    //
+    // The only options here that change what ends up in the archive rather
+    // than how the session is scheduled. Every one is a string or a bool
+    // mapping to exactly one `ytdl` flag: the GUI deliberately does NOT
+    // build a yt-dlp format selector, decide what audio-only means, or
+    // know that "Final Audio" exists. All of that lives in run_ytdlp.ps1,
+    // on the far side of the CLI_VERSION pin, so changing the semantics is
+    // a pipeline change the GUI inherits without a release of its own.
+    //
+    // Validation is likewise not duplicated here. ytdl.ps1 checks these at
+    // the point they reach it and exits non-zero naming the option, which
+    // surfaces in the run log like any other pipeline error. A second copy
+    // of the accepted-value lists in Rust would be a second thing to keep
+    // in step across two repos, for nothing the user can see.
+    /// full | video-only | audio-only | metadata-only | comments-only | subs-only
+    #[serde(default)]
+    pub mode: Option<String>,
+    /// A height in pixels, or "best".
+    #[serde(default)]
+    pub quality: Option<String>,
+    /// any | avc1 | vp9 | av01
+    #[serde(default)]
+    pub codec: Option<String>,
+    /// any | opus | aac | mp3 | flac -- only meaningful with mode audio-only.
+    #[serde(default)]
+    pub audio_codec: Option<String>,
+    /// mkv | mp4 | webm
+    #[serde(default)]
+    pub container: Option<String>,
+    #[serde(default)]
+    pub no_comments: bool,
+    #[serde(default)]
+    pub no_subs: bool,
+    #[serde(default)]
+    pub no_thumbnail: bool,
+    #[serde(default)]
+    pub no_metadata: bool,
+    /// Raw yt-dlp arguments, each emitted as its own `--ytdlp-arg`.
+    #[serde(default)]
+    pub ytdlp_args: Vec<String>,
 }
 
 impl RunOptions {
@@ -104,6 +146,62 @@ impl RunOptions {
         if let Some(p) = self.pot_port {
             v.push("--pot-port".into());
             v.push(p.to_string());
+        }
+
+        // --- Content options ---
+        //
+        // Each is emitted only when it differs from the pipeline's own
+        // default, so a plain download from this window produces exactly
+        // the command line it produced before these existed. That matters
+        // for more than tidiness: `--quality best`, `--codec any` and
+        // `--mode full` are all no-ops the pipeline would accept and
+        // ignore, but emitting them would put four extra flags in the
+        // command preview of every ordinary download and make the common
+        // case look complicated.
+        let non_default = |o: &Option<String>, default: &str| -> Option<String> {
+            o.as_ref()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty() && s != default)
+        };
+
+        if let Some(m) = non_default(&self.mode, "full") {
+            v.push("--mode".into());
+            v.push(m);
+        }
+        if let Some(q) = non_default(&self.quality, "best") {
+            v.push("--quality".into());
+            v.push(q);
+        }
+        if let Some(c) = non_default(&self.codec, "any") {
+            v.push("--codec".into());
+            v.push(c);
+        }
+        if let Some(a) = non_default(&self.audio_codec, "any") {
+            v.push("--audio-codec".into());
+            v.push(a);
+        }
+        if let Some(c) = non_default(&self.container, "mkv") {
+            v.push("--container".into());
+            v.push(c);
+        }
+        if self.no_comments {
+            v.push("--no-comments".into());
+        }
+        if self.no_subs {
+            v.push("--no-subs".into());
+        }
+        if self.no_thumbnail {
+            v.push("--no-thumbnail".into());
+        }
+        if self.no_metadata {
+            v.push("--no-metadata".into());
+        }
+        // Repeated rather than joined: ytdl.ps1 takes one value per
+        // occurrence, and a real --match-filter expression contains commas
+        // and spaces, so no separator would be safe to join on.
+        for a in self.ytdlp_args.iter().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+            v.push("--ytdlp-arg".into());
+            v.push(a.to_string());
         }
         v
     }
