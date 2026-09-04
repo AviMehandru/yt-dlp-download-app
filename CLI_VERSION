@@ -27,4 +27,12 @@ CLI_REF=main
 # archive written across an upgrade legitimately contains both versions.
 #
 # Raise this only after the GUI has been updated to read the newer layout.
-REQUIRES_ARCHIVE_LAYOUT=1
+#
+# 1 -> 2 with the pipeline's --mode work. Layout 2 renames an audio-only
+# run's media file to "Final Audio.<ext>", lets --container vary the
+# extension for video, and lets a per-video folder legitimately hold no
+# media file at all. archive.rs now finds media by base name rather than by
+# extension and treats its absence as an ordinary state; a conformance test
+# in that file asserts this number and SUPPORTED_ARCHIVE_LAYOUT agree, so
+# the two copies of this one fact cannot drift apart silently.
+REQUIRES_ARCHIVE_LAYOUT=2

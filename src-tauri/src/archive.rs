@@ -46,9 +46,26 @@ use crate::paths;
 ///
 /// Raise this only after the reader below actually handles the new layout.
 /// Must match REQUIRES_ARCHIVE_LAYOUT in CLI_VERSION.
-pub const SUPPORTED_ARCHIVE_LAYOUT: u64 = 1;
+/// Layout 2 (the pipeline's `--mode` work) changed three things this
+/// reader depends on: an audio-only run writes `Final Audio.<ext>` rather
+/// than `Final Video.<ext>`, `--container` makes the extension vary for
+/// video too, and the metadata-only / comments-only / subs-only modes
+/// write a complete per-video folder containing no media file at all.
+///
+/// The rename is what made this a breaking change rather than an additive
+/// one: a layout-1 reader globs for `Final Video.*`, finds nothing in an
+/// audio-only folder, and renders an empty entry with no error.
+pub const SUPPORTED_ARCHIVE_LAYOUT: u64 = 2;
 
 pub const VIDEO_EXTS: &[&str] = &[".mkv", ".mp4", ".webm", ".m4v", ".mov", ".avi", ".flv", ".ts"];
+/// Layout 2: an audio-only run leaves no video file in the folder at all.
+/// `.webm` is deliberately absent -- it is already in VIDEO_EXTS, and a
+/// WebM carrying only an Opus stream is found by the video pass and handled
+/// correctly by the player planner, which probes the real streams rather
+/// than trusting the extension.
+pub const AUDIO_EXTS: &[&str] = &[
+    ".m4a", ".opus", ".mp3", ".flac", ".ogg", ".oga", ".wav", ".aac",
+];
 pub const IMAGE_EXTS: &[&str] = &[".png", ".webp", ".jpg", ".jpeg", ".gif", ".avif"];
 pub const SUB_EXTS: &[&str] = &[
     ".vtt", ".srt", ".ass", ".ssa", ".lrc", ".json3", ".srv1", ".srv2", ".srv3", ".ttml",
@@ -155,12 +172,26 @@ impl Entry {
         self.light.files.iter().enumerate().find(|(_, f)| pred(f))
     }
 
-    /// The playable video, skipping Pre-merge streams/ -- see the module note.
+    /// The playable media file, skipping Pre-merge streams/ -- see the
+    /// module note. `None` is an ordinary answer under archive layout 2,
+    /// not a sign of a broken folder: the metadata-only, comments-only and
+    /// subs-only modes all write a complete folder with no media in it.
+    ///
+    /// Two passes rather than one combined predicate, so the preference for
+    /// video over audio is real rather than an accident of directory order
+    /// -- `find` returns the first match in file order.
+    ///
+    /// Pre-merge streams stay excluded for the reason they always did:
+    /// `--keep-video` leaves the raw video-only and audio-only halves
+    /// there, and picking one gives a silent video or a black screen, which
+    /// reads to a user as a corrupt archive rather than a wrong file.
     pub fn video_index(&self) -> Option<usize> {
-        self.find(|f| {
-            VIDEO_EXTS.contains(&f.ext.as_str()) && !f.folder.to_lowercase().contains("pre-merge")
-        })
-        .map(|(i, _)| i)
+        let usable = |f: &FileRec, exts: &[&str]| {
+            exts.contains(&f.ext.as_str()) && !f.folder.to_lowercase().contains("pre-merge")
+        };
+        self.find(|f| usable(f, VIDEO_EXTS))
+            .or_else(|| self.find(|f| usable(f, AUDIO_EXTS)))
+            .map(|(i, _)| i)
     }
 
     pub fn thumbnail_index(&self) -> Option<usize> {
@@ -366,12 +397,17 @@ impl Index {
                     continue;
                 }
                 // Tolerate a flatter layout (an older pipeline version, or
-                // someone reorganised): any folder directly holding a video
-                // file counts.
+                // someone reorganised): any folder directly holding a media
+                // file counts. Audio counts too under layout 2, where an
+                // audio-only run is a complete video folder that simply has
+                // no video file in it.
                 if let Ok(inner) = fs::read_dir(&vd) {
                     let has_video = inner.flatten().any(|e| {
                         let p = e.path();
-                        p.is_file() && VIDEO_EXTS.contains(&ext_of(&p).as_str())
+                        let ext = ext_of(&p);
+                        p.is_file()
+                            && (VIDEO_EXTS.contains(&ext.as_str())
+                                || AUDIO_EXTS.contains(&ext.as_str()))
                     });
                     if has_video {
                         out.push(vd);
@@ -1075,6 +1111,62 @@ mod tests {
             folder
         }
 
+
+        /// A layout-2 video folder whose media file is not `Final Video.mkv`.
+        /// `media` of `None` produces the no-media state the metadata-only,
+        /// comments-only and subs-only modes write, which is a valid folder
+        /// under layout 2 rather than an interrupted download.
+        fn add_video_media(
+            &self,
+            uploader: &str,
+            id: &str,
+            media: Option<&str>,
+            layout_version: Option<u64>,
+        ) -> PathBuf {
+            let folder = self
+                .root
+                .join(uploader)
+                .join(format!("{} - 20250301 - {} - A title", uploader, id));
+
+            if let Some(name) = media {
+                write(&folder.join("Final files").join(name), "not really media");
+            } else {
+                // The folder still exists and still carries everything a
+                // no-media mode writes -- it is complete, just without media.
+                fs::create_dir_all(folder.join("Final files")).unwrap();
+            }
+            write(&folder.join("Subtitles").join("Subtitles.en.vtt"), "WEBVTT\n\n");
+            write(&folder.join("Logs").join("video_complete.log"), "done\n");
+
+            let info = json!({
+                "id": id, "title": "A title", "uploader": uploader,
+                "upload_date": "20250301", "duration": 12.5
+            });
+            write(
+                &folder.join("Video metadata").join("Info.info.json"),
+                &serde_json::to_string(&info).unwrap(),
+            );
+
+            let mut manifest = serde_json::Map::new();
+            if let Some(v) = layout_version {
+                manifest.insert("archive_layout_version".into(), json!(v));
+            }
+            manifest.insert("video_id".into(), json!(id));
+            manifest.insert(
+                "media_file".into(),
+                match media {
+                    Some(n) => json!(format!("Final files/{}", n)),
+                    None => Value::Null,
+                },
+            );
+            write(
+                &folder.join("Video metadata").join("manifest.json"),
+                &serde_json::to_string(&Value::Object(manifest)).unwrap(),
+            );
+
+            folder
+        }
+
         fn scan(&self) -> Index {
             let mut idx = Index::new(self.cache.clone());
             idx.scan(self.root.clone(), true, |_, _, _| {}).expect("scan");
@@ -1211,5 +1303,102 @@ mod tests {
         assert_eq!(cues[0].text, "the load in a span");
         assert_eq!(cues[1].text, "goes to the tower", "the repeated prefix must be collapsed");
         assert_eq!(cues[2].text, "which is why it is thin");
+    }
+
+    // --- Archive layout 2 conformance -------------------------------------
+    //
+    // This is the half of the two-repo contract that lives here: a fixture
+    // built in the shape the pipeline documents, asserted to still be found
+    // by this reader. Without these, a layout change over there is a bug
+    // report from a user rather than a failing build here.
+
+    #[test]
+    fn finds_the_media_file_of_an_audio_only_download() {
+        // The rename that forced the layout bump. A layout-1 reader globs
+        // for "Final Video.*", finds nothing here, and renders an empty
+        // entry with no error anywhere -- exactly the silent failure the
+        // version number exists to convert into a message.
+        let f = Fixture::new("layout2-audio");
+        f.add_video_media("Bridgeworks Lab", "aUd1oOnly123", Some("Final Audio.m4a"), Some(2));
+
+        let lib = f.scan().library();
+        assert_eq!(lib.len(), 1, "an audio-only folder is still a video entry");
+        assert!(
+            lib[0].video_idx.is_some(),
+            "Final Audio.<ext> is the media file of an audio-only download and must be found"
+        );
+        assert!(
+            !lib[0].layout_too_new,
+            "layout 2 is what this reader supports; it must not be flagged as too new"
+        );
+    }
+
+    #[test]
+    fn finds_the_media_file_whatever_container_was_selected() {
+        // --container makes the extension vary for video too, so matching
+        // on ".mkv" is a layout-2 bug even for an ordinary video download.
+        for name in ["Final Video.mp4", "Final Video.webm", "Final Video.mkv"] {
+            let f = Fixture::new("layout2-container");
+            f.add_video_media("Marsh & Fen", "cOnta1ner12", Some(name), Some(2));
+            let lib = f.scan().library();
+            assert!(
+                lib[0].video_idx.is_some(),
+                "{name} is the final file when its base name says so"
+            );
+        }
+    }
+
+    #[test]
+    fn treats_a_folder_with_no_media_as_a_valid_entry() {
+        // metadata-only / comments-only / subs-only write a complete folder
+        // with no media in it. Hiding it, or reporting it as corrupt, would
+        // make those modes look broken.
+        let f = Fixture::new("layout2-nomedia");
+        f.add_video_media("Bridgeworks Lab", "n0Med1aRun1", None, Some(2));
+
+        let lib = f.scan().library();
+        assert_eq!(lib.len(), 1, "a media-less folder is still a library entry");
+        assert!(lib[0].video_idx.is_none(), "there is genuinely no media to play");
+        assert_eq!(
+            lib[0].title, "A title",
+            "its metadata must still be read and shown"
+        );
+    }
+
+    #[test]
+    fn still_prefers_video_over_audio_when_a_folder_holds_both() {
+        // Not a state the pipeline produces, but the two-pass lookup exists
+        // so the answer does not depend on directory order if it ever does.
+        let f = Fixture::new("layout2-both");
+        let folder = f.add_video_media("Marsh & Fen", "b0thK1nds12", Some("Final Video.mkv"), Some(2));
+        write(&folder.join("Final files").join("Final Audio.m4a"), "audio too");
+
+        let idx = f.scan();
+        let lib = idx.library();
+        let entry = idx.get(&lib[0].key).expect("entry");
+        let chosen = &entry.light.files[lib[0].video_idx.expect("some media")];
+        assert!(
+            chosen.rel.ends_with("Final Video.mkv"),
+            "video must win over audio, not whichever the filesystem listed first"
+        );
+    }
+
+    #[test]
+    fn supported_layout_matches_the_pin_in_cli_version() {
+        // CLI_VERSION's REQUIRES_ARCHIVE_LAYOUT and this constant are two
+        // copies of one fact -- the installer compares the first against
+        // the pipeline, this file compares the second per video. They
+        // disagreeing is how a GUI ends up claiming to read a layout it
+        // does not.
+        let pin = include_str!("../../CLI_VERSION");
+        let declared = pin
+            .lines()
+            .find_map(|l| l.trim().strip_prefix("REQUIRES_ARCHIVE_LAYOUT="))
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .expect("CLI_VERSION must declare REQUIRES_ARCHIVE_LAYOUT");
+        assert_eq!(
+            declared, SUPPORTED_ARCHIVE_LAYOUT,
+            "CLI_VERSION and archive.rs must agree on the layout this GUI reads"
+        );
     }
 }
