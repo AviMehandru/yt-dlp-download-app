@@ -1,0 +1,30 @@
+# The pipeline this GUI is built against.
+#
+# This file is the whole reason the two-repo split is safe rather than
+# merely tidy. The GUI does not vendor a copy of the pipeline -- it shells
+# out to the installed `ytdl` and reads the archive `postprocess.ps1`
+# writes -- so "which pipeline does this GUI expect" has to have an answer
+# that is written down, not inferred from whatever happened to be on the
+# machine.
+#
+# Read by setup.sh, setup.ps1 and scripts/setup-gui.ps1. Plain KEY=VALUE so
+# both bash and PowerShell can parse it without a library.
+
+# Where the pipeline lives.
+CLI_REPO=AviMehandru/yt-dlp-download-automator
+
+# Which ref of it to install. A TAG is the point of this file; `main` means
+# "whatever was pushed most recently", which is exactly the version skew
+# this pin exists to remove. Set it to a tag as soon as one exists, and bump
+# it deliberately after testing against that tag.
+CLI_REF=main
+
+# The archive layout version (docs/archive-layout.md in the pipeline repo)
+# this GUI knows how to read. The installer compares this against the
+# $ArchiveLayoutVersion the installed postprocess.ps1 declares and warns on
+# a mismatch; src-tauri/src/archive.rs makes the same comparison per video
+# at runtime, which is the one that actually protects a user, because an
+# archive written across an upgrade legitimately contains both versions.
+#
+# Raise this only after the GUI has been updated to read the newer layout.
+REQUIRES_ARCHIVE_LAYOUT=1
