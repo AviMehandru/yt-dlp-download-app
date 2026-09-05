@@ -34,13 +34,20 @@ See `docs/archive-layout.md` in the pipeline repo.
 
 ## Install
 
-Needs a Rust toolchain (not installed for you — it is a dependency only of
-this window) and, on Linux, the WebKitGTK development packages.
+Needs a Rust toolchain and, on Linux, the WebKitGTK development packages.
+Rust is not installed by default — it is a dependency only of this window,
+not of downloading — but `--install-rust` opts in, and the whole install then
+runs as one command in one terminal.
 
 ```
-./setup.sh                 # installs the pipeline, then builds the app
-./setup.sh --skip-cli      # pipeline already installed; just add the window
+./setup.sh                     # installs the pipeline, then builds the app
+./setup.sh --install-rust      # ... and installs Rust too, if it is missing
+./setup.sh --skip-cli          # pipeline already installed; just add the window
 ```
+
+On Windows the switch is `-InstallRust`. If you install Rust yourself
+instead, you do not need to open a new terminal before re-running: the
+installer looks in `~/.cargo/bin` as well as on `PATH`.
 
 Then:
 

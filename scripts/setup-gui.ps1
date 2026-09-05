@@ -103,23 +103,86 @@ $SourceFiles = @(
 # --- Step 1: prerequisites -------------------------------------------
 Write-Step "Checking prerequisites"
 
+# Rust is NOT installed for you here, deliberately. The pipeline
+# installer installs pwsh, deno, Node and yt-dlp because those are
+# dependencies of downloading. A Rust toolchain is a dependency only of
+# this window, it is ~1.5 GB, and rustup's installer is an unverified
+# curl-to-shell of exactly the kind the pipeline's SECURITY.md already
+# accounts for one instance of. The bootstraps offer --install-rust for
+# anyone who wants that trade; this script only ever FINDS a toolchain.
+#
+# Finding one is less trivial than Get-Command suggests. rustup's only
+# PATH wiring is a line appended to the user's shell profile, so a
+# toolchain installed minutes ago -- by --install-rust in the parent
+# bootstrap, or by hand in this same terminal -- is on disk and not on
+# PATH. That is the entire reason this used to end in "open a new
+# terminal and run it again". Prepending the bin dir to the PATH of THIS
+# process is enough: cargo is invoked as a child of it.
+$CargoHome = if ($env:CARGO_HOME) { $env:CARGO_HOME } else { Join-Path $HOME ".cargo" }
+$CargoBin  = Join-Path $CargoHome "bin"
+
 $CargoCmd = Get-Command cargo -ErrorAction SilentlyContinue
+if (-not $CargoCmd -and (Test-Path $CargoBin)) {
+    $env:PATH = $CargoBin + [System.IO.Path]::PathSeparator + $env:PATH
+    $CargoCmd = Get-Command cargo -ErrorAction SilentlyContinue
+    if ($CargoCmd) {
+        Write-Host "Found a Rust toolchain in $CargoBin that was not yet on PATH."
+        Write-Host "Using it for this build. New shells will pick it up from your profile."
+    }
+}
+
 if (-not $CargoCmd) {
-    # Rust is NOT installed for you, deliberately. The pipeline installer
-    # installs pwsh, deno, Node and yt-dlp because those are dependencies
-    # of downloading. A Rust toolchain is a dependency only of this
-    # window, it is ~1.5 GB, and rustup's installer is an unverified
-    # curl-to-shell of exactly the kind the pipeline's SECURITY.md
-    # already accounts for one instance of.
     Write-Host "Rust is not installed, so the GUI cannot be built."
     Write-Host "The pipeline itself is unaffected -- 'ytdl' and 'ytdl-view' work regardless."
     Write-Host ""
-    Write-Host "To install Rust and re-run this:"
-    Write-Host "    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs -o rustup.sh && sh rustup.sh"
-    Write-Host "    ./setup.sh --skip-cli"
+    Write-Host "Either let the bootstrap install it:"
+    if ($IsWindows) {
+        Write-Host "    .\setup.ps1 -SkipCli -InstallRust"
+    } else {
+        Write-Host "    ./setup.sh --skip-cli --install-rust"
+    }
+    Write-Host ""
+    Write-Host "or install it yourself and re-run -- no new terminal needed either way:"
+    Write-Host "    https://rustup.rs"
     exit 0
 }
 Write-Host "cargo: $($CargoCmd.Source)"
+
+# The minimum is enforced by cargo anyway, but only after it has resolved
+# the dependency graph, and its message names neither rustup nor the
+# command that fixes it. Checked here so the fix is one line up from the
+# failure. Read from the manifest when there is a checkout, so this can
+# never drift from the value the build actually enforces.
+$MinRust = "1.77"   # fallback for the no-checkout mode; keep = Cargo.toml rust-version
+$LocalManifest = Join-Path $SourceDir "src-tauri/Cargo.toml"
+if (Test-Path $LocalManifest) {
+    $rv = [regex]::Match((Get-Content -LiteralPath $LocalManifest -Raw), '(?m)^\s*rust-version\s*=\s*"([0-9.]+)"')
+    if ($rv.Success) { $MinRust = $rv.Groups[1].Value }
+}
+$RustcVersion = $null
+$rustcOut = (& rustc --version 2>$null)
+if ($LASTEXITCODE -eq 0 -and $rustcOut) {
+    $m = [regex]::Match($rustcOut, 'rustc\s+([0-9]+\.[0-9]+\.[0-9]+)')
+    if ($m.Success) { $RustcVersion = $m.Groups[1].Value }
+}
+if (-not $RustcVersion) {
+    Write-Warn "cargo is on PATH but 'rustc --version' did not report a version. Building anyway; if it fails on a language feature, the toolchain is the first thing to check."
+} elseif ([version]$RustcVersion -lt [version]$MinRust) {
+    Write-Host "Rust $RustcVersion is older than the $MinRust this app requires, so the GUI cannot be built."
+    Write-Host "The pipeline itself is unaffected -- 'ytdl' and 'ytdl-view' work regardless."
+    Write-Host ""
+    if (Get-Command rustup -ErrorAction SilentlyContinue) {
+        Write-Host "Update it and re-run:"
+        Write-Host "    rustup update stable"
+    } else {
+        # A distro-packaged rustc. rustup would install a second toolchain
+        # rather than upgrade this one, so say which is which.
+        Write-Host "This toolchain was not installed by rustup, so 'rustup update' does not apply."
+        Write-Host "Upgrade it through whatever installed it, or install rustup from https://rustup.rs"
+    }
+    exit 0
+}
+Write-Host "rustc: $RustcVersion (requires >= $MinRust)"
 
 if ($IsLinux) {
     # On Linux the webview is a SYSTEM library that cargo cannot fetch,

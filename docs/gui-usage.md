@@ -63,20 +63,46 @@ its own `TOTAL_STEPS` and its test suite asserts its three halves agree on it,
 so renumbering its output from the outside would break an invariant this repo
 does not own.
 
-Rust is **not** installed for you. The pipeline installer installs pwsh, deno,
-Node and yt-dlp because those are dependencies of *downloading*; a Rust
-toolchain is a dependency only of this window, it is ~1.5 GB, and rustup's
-installer is another unverified curl-to-shell of the kind the pipeline's
-`SECURITY.md` already accounts for one instance of.
+Rust is **not** installed by default. The pipeline installer installs pwsh,
+deno, Node and yt-dlp without asking because those are dependencies of
+*downloading*, the thing you came for; a Rust toolchain is a dependency only
+of this window, it is ~1.5 GB, and rustup's installer is another unverified
+curl-to-shell of the kind the pipeline's `SECURITY.md` already accounts for
+one instance of. Fetching that silently because you typed `./setup.sh` is a
+different bargain, so it is a flag rather than the default.
 
-So, from a clone:
+**`--install-rust` is that flag**, and with it the install is one command:
+
+```
+sudo apt install libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev patchelf   # Linux only
+./setup.sh --install-rust
+```
+
+On Windows, `.\setup.ps1 -InstallRust`. The flag installs rustup's stable
+toolchain with the **minimal** profile — rustc, cargo and the standard
+library, without rust-docs, clippy or rustfmt, none of which this app builds
+with. `rustup component add clippy rustfmt` gets them back. If rustup is
+already installed the flag updates the stable toolchain instead, and if
+`cargo` came from somewhere that is not rustup — a distro package, Homebrew —
+it is left alone rather than shadowed by a second toolchain.
+
+No new terminal is needed at any point. rustup's only PATH wiring is a line
+appended to your shell profile, which the already-running shell will never
+re-read; both bootstraps source the toolchain into their own process instead
+and export it to the build. That also means installing Rust **by hand** and
+re-running works in the same terminal: the prerequisite check looks in
+`$CARGO_HOME`/`~/.cargo/bin` as well as on `PATH`.
+
+Doing it by hand, from a clone:
 
 1. Install Rust, if you have not already:
 
    ```
    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs -o rustup.sh
-   sh rustup.sh
+   sh rustup.sh -y
    ```
+
+   `-y` matters: without it the installer stops on an interactive menu.
 
 2. On **Linux only**, install the system webview. Tauri uses the OS's own
    webview rather than shipping a browser, and on Linux that is a system
@@ -88,10 +114,21 @@ So, from a clone:
    ```
 
    macOS uses WKWebView and Windows uses WebView2; both are already there.
+   On Windows the MSVC toolchain also needs the Visual Studio C++ build
+   tools to link; rustup does not install those, and `-InstallRust` warns
+   when it cannot find them.
 
 3. Run `./setup.sh` (or `setup.ps1` on Windows).
 
 Then `ytdl-gui`.
+
+The toolchain minimum is `rust-version` in `src-tauri/Cargo.toml` (1.77).
+The installer checks it up front and names `rustup update stable`, rather
+than letting cargo fail on it later with a message that names neither.
+
+With `--install-rust` on Linux the webview check runs **before** the
+download, so a missing `libwebkit2gtk-4.1-dev` stops you in seconds rather
+than after 1.5 GB of toolchain you could not have used.
 
 A first build compiles several hundred crates and takes minutes. Rebuilds
 after an edit take seconds.
