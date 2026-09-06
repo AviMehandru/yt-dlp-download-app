@@ -40,12 +40,46 @@
     </header>
 
     <div class="card">
+      <!-- A profile is every option on this page except the URL. Deliberately
+           at the top: it is the control that changes the meaning of every
+           other control below it. -->
+      <div class="profile-bar">
+        <span class="label">Profile</span>
+        <select id="profile-pick"><option value="">No profile</option></select>
+        <span class="profile-state" id="profile-state"></span>
+        <span class="spacer"></span>
+        <button class="quiet small" id="btn-profile-save" type="button" disabled>Save</button>
+        <button class="quiet small" id="btn-profile-saveas" type="button">Save as&hellip;</button>
+        <button class="quiet small" id="btn-profile-revert" type="button" disabled>Revert</button>
+        <button class="quiet small" id="btn-profile-rename" type="button" disabled>Rename</button>
+        <button class="quiet small" id="btn-profile-delete" type="button" disabled>Delete</button>
+      </div>
+      <div class="profile-prompt" id="profile-prompt" hidden>
+        <span id="profile-prompt-label"></span>
+        <input type="text" id="profile-name" maxlength="60" placeholder="Profile name" spellcheck="false" />
+        <button class="primary small" id="btn-profile-ok" type="button">OK</button>
+        <button class="quiet small" id="btn-profile-cancel" type="button">Cancel</button>
+      </div>
+      <p class="err" id="profile-err" hidden></p>
+
       <label class="field">
         <span class="label">URL</span>
         <input type="text" id="url" placeholder="https://www.youtube.com/watch?v=… &nbsp; or a playlist, or a whole channel" spellcheck="false" />
       </label>
       <p class="hint">A single video, a playlist and a channel all take the same path &mdash; yt-dlp's
         extractor tells them apart, nothing in the pipeline does.</p>
+
+      <!-- The destination lives here rather than inside the collapsed options
+           block. It is not an advanced flag: it is where the files go. -->
+      <div class="field">
+        <span class="label">Save to &mdash; <code>--path</code></span>
+        <div class="path-row">
+          <input type="text" id="opt-path" placeholder="leave empty for the data root in Settings" spellcheck="false" />
+          <button class="quiet small" id="btn-pick-path" type="button">Choose&hellip;</button>
+          <button class="quiet small" id="btn-open-path" type="button">Open</button>
+        </div>
+      </div>
+      <p class="hint path-note" id="path-note">&nbsp;</p>
 
       <details class="opts" id="opts">
         <summary>Options <span class="opt-summary" id="opt-summary">defaults</span></summary>
@@ -67,9 +101,6 @@
 
           <label class="field inline"><span class="label">--workers</span>
             <input type="number" id="opt-workers" min="1" max="64" value="1" /></label>
-
-          <label class="field inline"><span class="label">--path</span>
-            <input type="text" id="opt-path" placeholder="leave empty for the default data root" spellcheck="false" /></label>
 
           <label class="check"><input type="checkbox" id="opt-nopot" /><span>
             <b>--no-pot</b> disable PO tokens
@@ -261,16 +292,27 @@
       <h1>Settings</h1>
     </header>
     <div class="card">
-      <label class="field"><span class="label">Data root</span>
-        <input type="text" id="set-dataroot" placeholder="empty = the install root's default" spellcheck="false" />
-      </label>
-      <p class="hint">The same path you would pass to <code>ytdl --path</code>. Only the data
-        (<code>Archive Logs/</code>, <code>Youtube Videos/</code>) lives here &mdash; the pipeline
-        install itself always stays at the install root.</p>
+      <div class="field"><span class="label">Data root</span>
+        <div class="path-row">
+          <input type="text" id="set-dataroot" placeholder="empty = the install root's default" spellcheck="false" />
+          <button class="quiet small" id="btn-pick-dataroot" type="button">Choose&hellip;</button>
+          <button class="quiet small" id="btn-open-dataroot" type="button">Open</button>
+        </div>
+      </div>
+      <p class="hint path-note" id="dataroot-note">&nbsp;</p>
+      <p class="hint">The same path you would pass to <code>ytdl --path</code>, and the default for
+        every download that does not set its own. Only the data (<code>Archive Logs/</code>,
+        <code>Youtube Videos/</code>) lives here &mdash; the pipeline install itself always stays at
+        the install root.</p>
 
-      <label class="field"><span class="label">Archive root override</span>
-        <input type="text" id="set-archiveroot" placeholder="empty = derive it from the data root" spellcheck="false" />
-      </label>
+      <div class="field"><span class="label">Archive root override</span>
+        <div class="path-row">
+          <input type="text" id="set-archiveroot" placeholder="empty = derive it from the data root" spellcheck="false" />
+          <button class="quiet small" id="btn-pick-archiveroot" type="button">Choose&hellip;</button>
+          <button class="quiet small" id="btn-open-archiveroot" type="button">Open</button>
+        </div>
+      </div>
+      <p class="hint path-note" id="archiveroot-note">&nbsp;</p>
       <p class="hint">Accepts a data root, the <code>Youtube Videos</code> folder, or
         <code>Complete Archive</code> itself.</p>
 

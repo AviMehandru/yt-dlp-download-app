@@ -11,14 +11,17 @@
 // pane offers either read something or open a terminal command for you to
 // run yourself.
 
-use std::io::Read;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
 use crate::paths;
+use crate::pipeline::now_secs;
 
 #[derive(Serialize, Clone, Debug)]
 pub struct Dependency {
@@ -35,13 +38,45 @@ fn first_line(s: &str) -> String {
     s.lines().next().unwrap_or("").trim().to_string()
 }
 
+/// How long a `--version` call gets before it is killed.
+///
+/// Not defensiveness: `yt-dlp --version` on a machine whose network is being
+/// filtered, and `pwsh --version` with a slow profile on a network drive, can
+/// both sit for a long time, and a Health page that hangs on one of them is
+/// indistinguishable from a Health page that is broken. A probe that overruns
+/// reports the tool as found with no version rather than blocking the pane.
+const PROBE_TIMEOUT: Duration = Duration::from_secs(8);
+
 fn version_of(exe: &Path, args: &[&str]) -> Option<String> {
-    let out = Command::new(exe)
+    let mut child = Command::new(exe)
         .args(args)
         .stdin(Stdio::null())
+        .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .output()
+        .spawn()
         .ok()?;
+
+    // try_wait rather than wait: there is no timeout in std::process, and
+    // every one of these tools writes well under a pipe buffer's worth of
+    // output for --version, so nothing can deadlock on an unread pipe while
+    // this polls.
+    let deadline = Instant::now() + PROBE_TIMEOUT;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) => {
+                if Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return None;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            Err(_) => return None,
+        }
+    }
+
+    let out = child.wait_with_output().ok()?;
     let text = if out.stdout.is_empty() {
         String::from_utf8_lossy(&out.stderr).to_string()
     } else {
@@ -55,83 +90,139 @@ fn version_of(exe: &Path, args: &[&str]) -> Option<String> {
     }
 }
 
-pub fn dependencies() -> Vec<Dependency> {
-    let mut out = Vec::new();
+type DepSpec = (
+    &'static str,
+    &'static str,
+    &'static [&'static str],
+    &'static str,
+    &'static str,
+);
 
-    let specs: &[(&str, &str, &[&str], &str, &str)] = &[
-        (
-            "pwsh",
-            "required",
-            &["--version"],
-            "PowerShell 7",
-            "Every stage of the pipeline is a PowerShell 7 script. Without it nothing downloads.",
-        ),
-        (
-            "yt-dlp",
-            "required",
-            &["--version"],
-            "yt-dlp",
-            "Does all the actual extraction. run_ytdlp.ps1 runs `yt-dlp -U` on a 24h throttle.",
-        ),
-        (
-            "ffmpeg",
-            "required",
-            &["-version"],
-            "ffmpeg",
-            "Merging, embedding, thumbnails, and this app's playback remuxes.",
-        ),
-        (
-            "ffprobe",
-            "recommended",
-            &["-version"],
-            "ffprobe",
-            "Without it, playback falls back to guessing that an .mkv is WebM-compatible.",
-        ),
-        (
-            "deno",
-            "recommended",
-            &["--version"],
-            "Deno",
-            "YouTube's JS challenge needs a JS runtime. Its absence usually shows up as \
-             mid-download HTTP 403s rather than an obvious error.",
-        ),
-        (
-            "node",
-            "optional",
-            &["--version"],
-            "Node.js",
-            "Runtime for the PO token provider server.",
-        ),
-        (
-            "python3",
-            "optional",
-            &["--version"],
-            "Python 3",
-            "Runs archive-viewer.py and installs the PO token plugin.",
-        ),
-    ];
+/// The probe result, with the time it was taken. Seven `--version` calls cost
+/// seconds -- pwsh and yt-dlp are the better part of one each on their own --
+/// and the Health pane is opened far more often than a toolchain changes, so
+/// the answer is kept and re-used until it is either stale or explicitly
+/// refreshed.
+/// Unix seconds the probe was taken, and what it found.
+type DepProbe = Option<(i64, Vec<Dependency>)>;
 
-    for (name, importance, args, _label, note) in specs {
-        let found = paths::which(name).or_else(|| {
-            if *name == "pwsh" {
-                paths::find_pwsh()
-            } else if *name == "python3" {
-                paths::which("python")
-            } else {
-                None
-            }
-        });
-        out.push(Dependency {
-            name,
-            found: found.is_some(),
-            version: found.as_deref().and_then(|p| version_of(p, args)),
-            path: found.map(|p| p.to_string_lossy().to_string()),
-            importance,
-            note,
-        });
-    }
-    out
+fn dep_cache() -> &'static Mutex<DepProbe> {
+    static CACHE: OnceLock<Mutex<DepProbe>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(None))
 }
+
+const DEP_TTL_SECS: i64 = 300;
+
+/// `force` is the Refresh button: it skips the cache and re-probes, which is
+/// what someone who has just installed a missing dependency expects that
+/// button to do.
+pub fn dependencies(force: bool) -> Vec<Dependency> {
+    if !force {
+        if let Some((at, deps)) = dep_cache().lock().unwrap().as_ref() {
+            if now_secs().saturating_sub(*at) < DEP_TTL_SECS {
+                return deps.clone();
+            }
+        }
+    }
+    let deps = probe_dependencies();
+    *dep_cache().lock().unwrap() = Some((now_secs(), deps.clone()));
+    deps
+}
+
+/// Probe every tool at once. These are seven independent subprocess spawns
+/// with nothing shared between them, so running them one after another simply
+/// added up their latencies -- the whole cost of the Health page's first paint
+/// used to be this loop.
+fn probe_dependencies() -> Vec<Dependency> {
+    let handles: Vec<_> = DEP_SPECS
+        .iter()
+        .map(|spec| {
+            let spec: DepSpec = *spec;
+            std::thread::spawn(move || probe_one(spec))
+        })
+        .collect();
+
+    // Collected in spawn order, so the table does not reshuffle itself
+    // depending on which tool answered first.
+    handles
+        .into_iter()
+        .filter_map(|h| h.join().ok())
+        .collect()
+}
+
+fn probe_one(spec: DepSpec) -> Dependency {
+    let (name, importance, args, _label, note) = spec;
+    let found = paths::which(name).or_else(|| {
+        if name == "pwsh" {
+            paths::find_pwsh()
+        } else if name == "python3" {
+            paths::which("python")
+        } else {
+            None
+        }
+    });
+    Dependency {
+        name,
+        found: found.is_some(),
+        version: found.as_deref().and_then(|p| version_of(p, args)),
+        path: found.map(|p| p.to_string_lossy().to_string()),
+        importance,
+        note,
+    }
+}
+
+const DEP_SPECS: &[DepSpec] = &[
+    (
+        "pwsh",
+        "required",
+        &["--version"],
+        "PowerShell 7",
+        "Every stage of the pipeline is a PowerShell 7 script. Without it nothing downloads.",
+    ),
+    (
+        "yt-dlp",
+        "required",
+        &["--version"],
+        "yt-dlp",
+        "Does all the actual extraction. run_ytdlp.ps1 runs `yt-dlp -U` on a 24h throttle.",
+    ),
+    (
+        "ffmpeg",
+        "required",
+        &["-version"],
+        "ffmpeg",
+        "Merging, embedding, thumbnails, and this app's playback remuxes.",
+    ),
+    (
+        "ffprobe",
+        "recommended",
+        &["-version"],
+        "ffprobe",
+        "Without it, playback falls back to guessing that an .mkv is WebM-compatible.",
+    ),
+    (
+        "deno",
+        "recommended",
+        &["--version"],
+        "Deno",
+        "YouTube's JS challenge needs a JS runtime. Its absence usually shows up as \
+         mid-download HTTP 403s rather than an obvious error.",
+    ),
+    (
+        "node",
+        "optional",
+        &["--version"],
+        "Node.js",
+        "Runtime for the PO token provider server.",
+    ),
+    (
+        "python3",
+        "optional",
+        &["--version"],
+        "Python 3",
+        "Runs archive-viewer.py and installs the PO token plugin.",
+    ),
+];
 
 #[derive(Serialize, Clone, Debug)]
 pub struct InstalledFile {
@@ -221,13 +312,7 @@ pub struct PotStatus {
 /// whether a session wants PO tokens at all.
 pub fn pot_status() -> PotStatus {
     let root = paths::install_root().join("pot-provider");
-    let log = root.join("pot-server.log");
-    let mut tail = String::new();
-    if let Ok(text) = std::fs::read_to_string(&log) {
-        let lines: Vec<&str> = text.lines().collect();
-        let start = lines.len().saturating_sub(40);
-        tail = lines[start..].join("\n");
-    }
+    let tail = tail_lines(&root.join("pot-server.log"), 40, 64 * 1024);
     PotStatus {
         script_present: paths::scripts_dir().join("pot-provider.ps1").is_file(),
         server_built: root.join("server").join("build").join("main.js").is_file(),
@@ -355,15 +440,50 @@ fn sha256_file(path: &Path) -> Option<String> {
     Some(hasher.finalize().iter().map(|b| format!("{:02x}", b)).collect())
 }
 
-/// The tail of download.log, for the "what happened last time" panel. Read
-/// from the end rather than parsed: this file is the pipeline's own record
-/// and the GUI has no business interpreting more of it than the session
-/// summary line it already reads while a run is live.
+/// The tail of download.log, for the "what happened last time" panel. Not
+/// parsed: this file is the pipeline's own record and the GUI has no business
+/// interpreting more of it than the session summary line it already reads
+/// while a run is live.
 pub fn log_tail(path: &Path, lines: usize) -> String {
-    let Ok(text) = std::fs::read_to_string(path) else {
+    tail_lines(path, lines, 1024 * 1024)
+}
+
+/// The last `lines` lines of a file, without reading the file.
+///
+/// download.log is appended to by every run and never rotated by the
+/// pipeline, so on a machine that has been archiving for a while it is the
+/// largest thing the Health page touches. Reading it whole to keep the last
+/// 300 lines meant the pane's cost grew with the age of the install, for a
+/// panel whose content is fixed-size. This seeks to the last `max_bytes` and
+/// works backwards from there instead, so the cost is constant.
+///
+/// The first line of that window is dropped when the window did not start at
+/// the beginning of the file, because it is almost certainly half a line.
+fn tail_lines(path: &Path, lines: usize, max_bytes: u64) -> String {
+    let Ok(mut fh) = std::fs::File::open(path) else {
         return String::new();
     };
-    let all: Vec<&str> = text.lines().collect();
-    let start = all.len().saturating_sub(lines);
-    all[start..].join("\n")
+    let Ok(md) = fh.metadata() else {
+        return String::new();
+    };
+    let start = md.len().saturating_sub(max_bytes);
+    if fh.seek(SeekFrom::Start(start)).is_err() {
+        return String::new();
+    }
+    let mut buf = Vec::new();
+    if fh.read_to_end(&mut buf).is_err() {
+        return String::new();
+    }
+    let text = String::from_utf8_lossy(&buf).into_owned();
+    let window = if start > 0 {
+        match text.find('\n') {
+            Some(i) => &text[i + 1..],
+            None => "",
+        }
+    } else {
+        text.as_str()
+    };
+    let all: Vec<&str> = window.lines().collect();
+    let from = all.len().saturating_sub(lines);
+    all[from..].join("\n")
 }

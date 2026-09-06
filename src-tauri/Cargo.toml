@@ -24,6 +24,14 @@ tauri-build = { version = "2", features = [] }
 # formatted in the frontend).
 [dependencies]
 tauri = { version = "2", features = [] }
+# The ONLY plugin, and it is used from Rust only: pick_folder in main.rs calls
+# it, and capabilities/default.json still grants the frontend nothing beyond
+# core:default. A destination path is the one thing a user cannot reasonably
+# be asked to type from memory, and every alternative to a native picker is
+# either a path-typing box with a nicer border or a filesystem-listing command
+# exposed to the webview -- which is precisely the surface this app does not
+# have.
+tauri-plugin-dialog = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"

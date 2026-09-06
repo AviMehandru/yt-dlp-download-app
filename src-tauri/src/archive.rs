@@ -706,6 +706,24 @@ impl Index {
         self.entries.get(key)
     }
 
+    /// Video count, channel count and total archived bytes, without building
+    /// the library.
+    ///
+    /// The Health pane wants exactly these three numbers, and used to get
+    /// them by calling library() and measuring the result -- which clones
+    /// every title, uploader and file list in the archive, allocates a
+    /// LibraryItem per video and re-derives each one's thumbnail and video
+    /// index, then throws all of it away. That was the most expensive thing
+    /// the pane did that produced nothing visible.
+    pub fn stats(&self) -> (usize, usize, u64) {
+        let bytes = self
+            .entries
+            .values()
+            .map(|e| e.light.files.iter().map(|f| f.size).sum::<u64>())
+            .sum();
+        (self.order.len(), self.channels.len(), bytes)
+    }
+
     pub fn library(&self) -> Vec<LibraryItem> {
         self.order
             .iter()

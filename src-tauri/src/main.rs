@@ -33,6 +33,7 @@ mod health;
 mod media;
 mod paths;
 mod pipeline;
+mod profiles;
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock};
@@ -89,6 +90,7 @@ pub struct AppState {
     runner: Arc<pipeline::Runner>,
     media: Arc<media::Media>,
     settings: Mutex<Settings>,
+    profiles: Mutex<profiles::Store>,
     scanning: Mutex<bool>,
 }
 
@@ -149,6 +151,166 @@ fn locations(state: State<AppState>) -> Value {
         "pwsh": paths::find_pwsh().map(|p| p.to_string_lossy().to_string()),
         "platform": std::env::consts::OS,
     })
+}
+
+/// What a typed destination actually resolves to, and whether it is there.
+///
+/// The path boxes used to be write-only: a typo, a path on an unmounted
+/// volume and a correct path all looked identical until a run failed or the
+/// library came back empty. This is what the note under each box reports.
+#[derive(Serialize)]
+struct PathCheck {
+    input: String,
+    /// After ~ expansion. What the pipeline will actually be given.
+    expanded: String,
+    exists: bool,
+    is_dir: bool,
+    /// The Complete Archive directory found under it, if any.
+    archive_root: Option<String>,
+    /// Plain-language summary for the UI, so the wording lives in one place
+    /// rather than being reassembled in JS.
+    note: String,
+}
+
+#[tauri::command(async)]
+fn check_path(path: String) -> PathCheck {
+    let input = path.trim().to_string();
+    if input.is_empty() {
+        let root = paths::install_root();
+        return PathCheck {
+            note: format!(
+                "Empty means the pipeline's own default, which is the install root: {}",
+                root.display()
+            ),
+            expanded: root.to_string_lossy().to_string(),
+            exists: root.is_dir(),
+            is_dir: root.is_dir(),
+            archive_root: paths::resolve_archive_root(&root).map(|p| p.to_string_lossy().to_string()),
+            input,
+        };
+    }
+
+    let p = paths::expand_tilde(Path::new(&input));
+    let exists = p.exists();
+    let is_dir = p.is_dir();
+    let archive_root = paths::resolve_archive_root(&p).map(|p| p.to_string_lossy().to_string());
+
+    // Relative paths are accepted but called out: run_ytdlp.ps1 resolves them
+    // with GetFullPath against ITS working directory, which is not this
+    // window's and is not something a user can predict.
+    let relative = !p.is_absolute();
+
+    let note = if !exists {
+        format!(
+            "{} does not exist yet. run_ytdlp.ps1 creates the whole scaffolding \
+             (Archive Logs/, Youtube Videos/) on the first run, so this is fine for a new archive \
+             -- but it is also what a typo looks like.",
+            p.display()
+        )
+    } else if !is_dir {
+        format!("{} is a file, not a folder.", p.display())
+    } else if relative {
+        "A relative path is resolved against the working directory of the pipeline process, not \
+         this window's. Use an absolute path."
+            .to_string()
+    } else if let Some(root) = &archive_root {
+        format!("Existing archive found: {}", root)
+    } else {
+        format!(
+            "{} exists and is empty of an archive. A run against it starts a new one.",
+            p.display()
+        )
+    };
+
+    PathCheck {
+        input,
+        expanded: p.to_string_lossy().to_string(),
+        exists,
+        is_dir,
+        archive_root,
+        note,
+    }
+}
+
+/// The native folder picker.
+///
+/// Note what this does NOT do: it does not grant the frontend a dialog
+/// permission. tauri-plugin-dialog is a Rust dependency called from here, and
+/// the capability set still lists only core:default -- the window can ask for
+/// a folder the USER chose and gets back exactly that one string, which is a
+/// different thing from being able to open a dialog of its own construction.
+///
+/// #[tauri::command(async)] is load-bearing rather than decorative:
+/// blocking_pick_folder must not run on the main thread, where the platform's
+/// own event loop has to keep turning for the dialog to draw at all.
+#[tauri::command(async)]
+fn pick_folder(app: AppHandle, start: Option<String>) -> Option<String> {
+    use tauri_plugin_dialog::DialogExt;
+
+    let mut builder = app.dialog().file().set_title("Choose a destination folder");
+    if let Some(dir) = start.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()) {
+        let expanded = paths::expand_tilde(Path::new(&dir));
+        if expanded.is_dir() {
+            builder = builder.set_directory(expanded);
+        }
+    }
+    builder
+        .blocking_pick_folder()
+        .and_then(|f| f.into_path().ok())
+        .map(|p| p.to_string_lossy().to_string())
+}
+
+// ---------------------------------------------------------------------------
+// Profiles
+// ---------------------------------------------------------------------------
+//
+// Every command here returns the WHOLE store rather than an acknowledgement.
+// The frontend then has one way to learn what the profiles are -- it redraws
+// from whatever came back -- instead of a local copy that has to be patched
+// in step with each operation and can drift out of it.
+
+#[tauri::command]
+fn profiles_list(state: State<AppState>) -> profiles::Store {
+    state.profiles.lock().unwrap().clone()
+}
+
+#[tauri::command]
+fn profile_save(
+    state: State<AppState>,
+    name: String,
+    opts: pipeline::RunOptions,
+) -> Result<profiles::Store, String> {
+    let mut store = state.profiles.lock().unwrap();
+    profiles::save_profile(&mut store, &name, opts)?;
+    Ok(store.clone())
+}
+
+#[tauri::command]
+fn profile_delete(state: State<AppState>, name: String) -> Result<profiles::Store, String> {
+    let mut store = state.profiles.lock().unwrap();
+    profiles::delete_profile(&mut store, &name)?;
+    Ok(store.clone())
+}
+
+#[tauri::command]
+fn profile_rename(
+    state: State<AppState>,
+    from: String,
+    to: String,
+) -> Result<profiles::Store, String> {
+    let mut store = state.profiles.lock().unwrap();
+    profiles::rename_profile(&mut store, &from, &to)?;
+    Ok(store.clone())
+}
+
+#[tauri::command]
+fn profile_activate(
+    state: State<AppState>,
+    name: Option<String>,
+) -> Result<profiles::Store, String> {
+    let mut store = state.profiles.lock().unwrap();
+    profiles::activate(&mut store, name)?;
+    Ok(store.clone())
 }
 
 // ---------------------------------------------------------------------------
@@ -259,8 +421,8 @@ fn archive_rescan(app: AppHandle, state: State<'_, AppState>, force: bool) -> Re
     Ok(())
 }
 
-#[tauri::command]
-fn archive_library(state: State<AppState>) -> Value {
+#[tauri::command(async)]
+fn archive_library(state: State<'_, AppState>) -> Value {
     let idx = state.index.read().unwrap();
     json!({
         "root": idx.root.as_ref().map(|p| p.to_string_lossy().to_string()),
@@ -269,8 +431,8 @@ fn archive_library(state: State<AppState>) -> Value {
     })
 }
 
-#[tauri::command]
-fn archive_video(state: State<AppState>, key: String) -> Result<Value, String> {
+#[tauri::command(async)]
+fn archive_video(state: State<'_, AppState>, key: String) -> Result<Value, String> {
     let idx = state.index.read().unwrap();
     let entry = idx.get(&key).ok_or("unknown video")?;
     let full = archive::load_full_info(entry);
@@ -319,8 +481,8 @@ fn archive_video(state: State<AppState>, key: String) -> Result<Value, String> {
     }))
 }
 
-#[tauri::command]
-fn archive_comments(state: State<AppState>, key: String) -> Result<Value, String> {
+#[tauri::command(async)]
+fn archive_comments(state: State<'_, AppState>, key: String) -> Result<Value, String> {
     let idx = state.index.read().unwrap();
     let entry = idx.get(&key).ok_or("unknown video")?;
     let threads = archive::load_comments(entry);
@@ -328,16 +490,16 @@ fn archive_comments(state: State<AppState>, key: String) -> Result<Value, String
     Ok(json!({ "threads": threads, "total": total }))
 }
 
-#[tauri::command]
-fn archive_transcript(state: State<AppState>, key: String, idx: usize) -> Result<Value, String> {
+#[tauri::command(async)]
+fn archive_transcript(state: State<'_, AppState>, key: String, idx: usize) -> Result<Value, String> {
     let index = state.index.read().unwrap();
     let entry = index.get(&key).ok_or("unknown video")?;
     let path = entry.path_for_index(idx).ok_or("no such file")?;
     Ok(json!({ "cues": archive::parse_subtitle_cues(&path) }))
 }
 
-#[tauri::command]
-fn archive_file_text(state: State<AppState>, key: String, idx: usize) -> Result<String, String> {
+#[tauri::command(async)]
+fn archive_file_text(state: State<'_, AppState>, key: String, idx: usize) -> Result<String, String> {
     let index = state.index.read().unwrap();
     let entry = index.get(&key).ok_or("unknown video")?;
     let path = entry.path_for_index(idx).ok_or("no such file")?;
@@ -415,8 +577,8 @@ fn open_with_os(path: &Path) -> Result<(), String> {
 // Playback preparation
 // ---------------------------------------------------------------------------
 
-#[tauri::command]
-fn media_status(state: State<AppState>, key: String, mode: String) -> Result<media::JobState, String> {
+#[tauri::command(async)]
+fn media_status(state: State<'_, AppState>, key: String, mode: String) -> Result<media::JobState, String> {
     let index = state.index.read().unwrap();
     let entry = index.get(&key).ok_or("unknown video")?;
     let idx = entry.video_index().ok_or("this folder has no video file")?;
@@ -424,10 +586,10 @@ fn media_status(state: State<AppState>, key: String, mode: String) -> Result<med
     Ok(state.media.status(&key, &src, &mode))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn media_start(
     app: AppHandle,
-    state: State<AppState>,
+    state: State<'_, AppState>,
     key: String,
     mode: String,
 ) -> Result<media::JobState, String> {
@@ -450,20 +612,18 @@ fn media_start(
 // Health
 // ---------------------------------------------------------------------------
 
-#[tauri::command]
-fn health_report(state: State<AppState>) -> Value {
+/// Everything the Health pane can answer from files it already has open.
+///
+/// Split from the dependency probe on purpose. This half is file reads and
+/// costs milliseconds; the other half spawns seven processes and costs
+/// seconds. Reporting them together meant the whole pane waited on the
+/// slowest `--version` call on the machine before it drew anything at all,
+/// which is what made the page feel broken rather than slow.
+#[tauri::command(async)]
+fn health_overview(state: State<'_, AppState>) -> Value {
     let data_root = state.data_root();
-    let (videos, channels, bytes) = {
-        let idx = state.index.read().unwrap();
-        let lib = idx.library();
-        (
-            lib.len(),
-            idx.channels.len(),
-            lib.iter().map(|v| v.total_bytes).sum::<u64>(),
-        )
-    };
+    let (videos, channels, bytes) = state.index.read().unwrap().stats();
     json!({
-        "dependencies": health::dependencies(),
         "installed": health::installed_files(),
         "config": health::config_info(),
         "pot": health::pot_status(),
@@ -474,8 +634,16 @@ fn health_report(state: State<AppState>) -> Value {
     })
 }
 
-#[tauri::command]
-fn verify_video(state: State<AppState>, key: String) -> Result<health::ChecksumResult, String> {
+/// The slow half. `force` is the Refresh button; without it a probe taken in
+/// the last five minutes is re-used, because the Health pane is opened far
+/// more often than a toolchain changes.
+#[tauri::command(async)]
+fn health_dependencies(force: bool) -> Vec<health::Dependency> {
+    health::dependencies(force)
+}
+
+#[tauri::command(async)]
+fn verify_video(state: State<'_, AppState>, key: String) -> Result<health::ChecksumResult, String> {
     let index = state.index.read().unwrap();
     let entry = index.get(&key).ok_or("unknown video")?;
     let dir = entry.dir.clone();
@@ -483,8 +651,8 @@ fn verify_video(state: State<AppState>, key: String) -> Result<health::ChecksumR
     Ok(health::verify_checksums(&dir))
 }
 
-#[tauri::command]
-fn read_log(state: State<AppState>, which: String, lines: usize) -> Value {
+#[tauri::command(async)]
+fn read_log(state: State<'_, AppState>, which: String, lines: usize) -> Value {
     let logs = state.data_root().join("Archive Logs").join("Logs");
     let path = match which.as_str() {
         "archive" => logs.join("archive.txt"),
@@ -694,10 +862,15 @@ fn main() {
         runner: runner.clone(),
         media,
         settings: Mutex::new(settings),
+        profiles: Mutex::new(profiles::load()),
         scanning: Mutex::new(false),
     };
 
     tauri::Builder::default()
+        // Registered for its Rust API only -- see pick_folder. No dialog
+        // permission is granted to the frontend in capabilities/default.json,
+        // so the window still cannot open a dialog it composed itself.
+        .plugin(tauri_plugin_dialog::init())
         .manage(state)
         // The handler receives a UriSchemeContext rather than an &AppHandle
         // (Tauri changed this within 2.x); app_handle() is what both spellings
@@ -709,6 +882,13 @@ fn main() {
             get_settings,
             set_settings,
             locations,
+            check_path,
+            pick_folder,
+            profiles_list,
+            profile_save,
+            profile_delete,
+            profile_rename,
+            profile_activate,
             command_preview,
             run_enqueue,
             run_cancel,
@@ -727,7 +907,8 @@ fn main() {
             open_path,
             media_status,
             media_start,
-            health_report,
+            health_overview,
+            health_dependencies,
             verify_video,
             read_log,
         ])

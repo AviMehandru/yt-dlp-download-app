@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Core window and event permissions. Everything this app can do to the filesystem or to a process goes through its own #[tauri::command] functions in main.rs, which is why no filesystem, shell, or dialog plugin permission is granted here -- there is no general-purpose 'read this path' or 'run this command' surface exposed to the frontend at all.",
+  "description": "Core window and event permissions. Everything this app can do to the filesystem or to a process goes through its own #[tauri::command] functions in main.rs, which is why no filesystem, shell, or dialog plugin permission is granted here -- there is no general-purpose 'read this path' or 'run this command' surface exposed to the frontend at all. tauri-plugin-dialog IS a dependency as of the folder picker, and its absence from this list is deliberate: pick_folder is a command in main.rs that hands back the one folder the USER chose in the platform's own dialog, which is a different thing from letting the webview open a dialog it composed itself.",
   "windows": ["main"],
   "permissions": ["core:default"]
 }

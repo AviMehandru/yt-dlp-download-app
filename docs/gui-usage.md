@@ -167,10 +167,48 @@ the platform it targets; there is no cross-compilation here.
 
 ### Download
 
-URL, options, and the command preview. The options are exactly `ytdl.ps1`'s,
-in three groups.
+A profile selector, the URL, the destination, options, and the command
+preview. The options are exactly `ytdl.ps1`'s, in three groups.
 
-**Session** — `--sync`, `--items`, `--after`, `--lazy`, `--workers`, `--path`,
+**The destination** sits under the URL rather than inside the collapsed
+options block, because it is not an advanced flag — it is where the files go.
+It is the per-run `--path`; leaving it empty uses the data root from Settings,
+and leaving that empty uses the pipeline's own default, which is the install
+root. **Choose…** opens the platform's folder picker, **Open** opens the
+resolved folder in the file manager, and the line underneath says what the
+typed path actually resolves to: whether it exists, whether an archive was
+found in it, and what `~` expanded to.
+
+That last part was a real bug and not only a convenience. `run_ytdlp.ps1`
+resolves `-DataRoot` with `[System.IO.Path]::GetFullPath`, which has no notion
+of a home directory, so `~/Videos` reached it as a literal folder called `~`
+under the pipeline process's working directory — while this app's own path
+handling *did* expand it. The same typed path therefore meant two different
+folders: the Library indexed one and the downloads went to the other, with
+nothing reporting an error. The expansion now happens once, in
+`RunOptions::to_args`, at the point a path leaves this process.
+
+**Profiles** are every option on this page except the URL, saved under a name.
+Pick one from the dropdown and every control below is set from it; change
+anything and the bar says *unsaved changes*, at which point **Save** overwrites
+that profile and **Revert** puts it back. **Save as…** names a new one,
+**Rename** and **Delete** do what they say, and the profile in use when the
+window closed is restored the next time it opens.
+
+A profile is stored as a `RunOptions` — the same struct the runner takes —
+which is why there is no list of profiled fields anywhere in the code: an
+option added to the pipeline and wired up here becomes profileable without
+anything else being updated, and a profile written before an option existed
+simply does not set it. The URL is never stored, because a preset that quietly
+replaced what you were about to download would be the one thing a preset must
+never do.
+
+Profiles live in `profiles.json` beside `settings.json` in the config
+directory, written through a temp file and renamed — losing a set of profiles
+built up over months is losing real work, unlike the five values in
+`settings.json`.
+
+**Session** — `--sync`, `--items`, `--after`, `--lazy`, `--workers`,
 `--no-pot`, `--skip-pot-update`, `--pot-port`. Each carries the same caveat it
 has in `docs/ytdl-usage.md`: `--sync` is only safe for newest-first listings,
 `--lazy` does nothing when workers > 1, and raising workers multiplies your
@@ -291,13 +329,46 @@ once-per-24h dependency check, and a second updater racing it from a GUI is
 exactly the kind of shared-state collision the rest of this project is built
 to avoid.
 
+**What it costs to open.** This pane used to be one command that did
+everything and one `await` that waited for all of it, so the slowest
+`--version` call on the machine decided when the first pixel appeared. It is
+now two commands and three independent fills:
+
+- The **dependency probe** spawns its seven `--version` subprocesses in
+  parallel rather than one after another, gives each 8 seconds before killing
+  it (a tool found on PATH that never answers is reported as found with no
+  version, and the card says which), and the result is cached for five
+  minutes. **Refresh** skips the cache — that is what it is for, and it is
+  what you want after installing something that was missing.
+- The **cheap half** — installed files, `yt-dlp.conf`, PO token state, archive
+  statistics — paints immediately. The three archive counts used to be taken
+  by building the entire library and measuring it, which clones every title,
+  uploader and file list in the archive and throws all of it away; they are
+  now counted from the index directly.
+- **Log tails** are read by seeking to the end of the file. `download.log` is
+  appended to by every run and never rotated, so reading it whole to keep the
+  last 300 lines made this pane's cost grow with the age of the install, for a
+  panel whose content is a fixed 300 lines.
+
+Re-entering the tab repaints from what the last visit fetched instead of
+starting over.
+
 ### Settings
 
-Data root (the `ytdl --path` equivalent), an archive-root override for when
+Data root (the `ytdl --path` equivalent, and the default destination for every
+download that does not set its own), an archive-root override for when
 autodetection guesses wrong, default worker count, whether re-encoding is
-offered at all, and the theme. Settings, queue and history live in a platform
-config directory; the index and playback copies live in a platform cache
-directory. The cache is disposable — deleting it costs one re-index.
+offered at all, and the theme. Both path boxes have the same **Choose…**,
+**Open** and resolved-path line as the Download pane's destination.
+
+Saving a *changed* data or archive root re-indexes the library. Without that
+the index in memory is still the old root's, so the Library keeps showing
+videos from a folder the app is no longer pointed at — which reads as the
+setting not having taken.
+
+Settings, profiles, queue and history live in a platform config directory; the
+index and playback copies live in a platform cache directory. The cache is
+disposable — deleting it costs one re-index.
 
 ## Where things live
 

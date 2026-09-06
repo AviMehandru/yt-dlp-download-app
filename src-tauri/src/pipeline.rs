@@ -107,6 +107,20 @@ pub struct RunOptions {
     pub ytdlp_args: Vec<String>,
 }
 
+/// Expand `~` before a destination path leaves this process.
+///
+/// run_ytdlp.ps1 resolves -DataRoot with [System.IO.Path]::GetFullPath, which
+/// has no notion of a home directory: `~/Videos` becomes a literal folder
+/// called `~` under whatever the pipeline process's working directory happens
+/// to be. Meanwhile this app's own paths::expand_tilde DID expand it, so the
+/// same typed path pointed at two different places -- the library indexed one
+/// and the downloads went to the other, with nothing reporting an error.
+/// Expanding here, at the one point a path crosses out of this process, is
+/// what makes those the same folder again.
+pub fn expanded_data_root(raw: &str) -> PathBuf {
+    paths::expand_tilde(std::path::Path::new(raw.trim()))
+}
+
 impl RunOptions {
     /// Everything after the script path. The URL is always first and always
     /// a full URL: ytdl.ps1 accepts a bare 11-character id, but `pwsh -File`
@@ -117,7 +131,7 @@ impl RunOptions {
         let mut v = vec![normalize_url(&self.url)];
         if let Some(p) = self.data_root.as_ref().filter(|s| !s.trim().is_empty()) {
             v.push("--path".into());
-            v.push(p.clone());
+            v.push(expanded_data_root(p).to_string_lossy().to_string());
         }
         if self.sync {
             v.push("--sync".into());
@@ -696,8 +710,9 @@ fn run_one(app: &AppHandle, runner: &Arc<Runner>, item: QueueItem) {
     // by directory rather than by name.
     let data_root = opts
         .data_root
-        .clone()
-        .map(PathBuf::from)
+        .as_deref()
+        .filter(|s| !s.trim().is_empty())
+        .map(expanded_data_root)
         .unwrap_or_else(paths::install_root);
     rec.log_path = Some(
         data_root

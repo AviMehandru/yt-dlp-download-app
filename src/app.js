@@ -30,6 +30,12 @@ const S = {
   video: null,
   cues: [],
   scanning: false,
+  /* { active, profiles: [{name, opts, saved}] } -- always the whole store as
+   * the Rust side last returned it, never a locally patched copy. */
+  profiles: { active: null, profiles: [] },
+  /* Last Health answers, so re-entering the tab paints from them rather than
+   * from a spinner. */
+  health: { overview: null, deps: null, log: null },
 };
 
 const $ = (sel) => document.querySelector(sel);
@@ -89,7 +95,7 @@ function show(view) {
   $$(".view").forEach((v) => v.classList.toggle("active", v.id === `view-${view}`));
   $$(".nav").forEach((b) => b.classList.toggle("active", b.dataset.view === view));
   if (view === "library" && !S.library.length && !S.scanning) refreshLibrary();
-  if (view === "health") loadHealth();
+  if (view === "health") loadHealth(false);
 }
 
 $$(".nav").forEach((b) => b.addEventListener("click", () => show(b.dataset.view)));
@@ -138,6 +144,42 @@ function readOptions() {
     ytdlp_args: $("#opt-ytdlpargs").value
       .split("\n").map((s) => s.trim()).filter((s) => s !== ""),
   };
+}
+
+/* The inverse of readOptions: put a saved option set back into the controls.
+ *
+ * Deliberately exhaustive rather than a loop over a field->selector map,
+ * because a checkbox, a number, a text box and a select each need a
+ * different fallback for a missing value, and a map would have to carry that
+ * anyway. A field this misses is a field a profile silently fails to
+ * restore, so it is written where readOptions can be read beside it. */
+function setOptions(o) {
+  const sel = (id, v, fallback) => {
+    const el = $(id);
+    /* A value written by a newer build -- or an option removed from the
+     * pipeline since -- would otherwise select nothing at all and read as
+     * an empty box. */
+    el.value = Array.from(el.options).some((x) => x.value === v) ? v : fallback;
+  };
+  $("#opt-path").value = o.data_root || "";
+  $("#opt-sync").checked = !!o.sync;
+  $("#opt-items").value = o.items || "";
+  $("#opt-after").value = o.after || "";
+  $("#opt-lazy").checked = !!o.lazy;
+  $("#opt-workers").value = o.workers || 1;
+  $("#opt-nopot").checked = !!o.no_pot;
+  $("#opt-skippot").checked = !!o.skip_pot_update;
+  $("#opt-potport").value = o.pot_port || "";
+  sel("#opt-mode", o.mode || "full", "full");
+  sel("#opt-quality", o.quality || "best", "best");
+  sel("#opt-codec", o.codec || "any", "any");
+  sel("#opt-audiocodec", o.audio_codec || "any", "any");
+  sel("#opt-container", o.container || "mkv", "mkv");
+  $("#opt-nocomments").checked = !!o.no_comments;
+  $("#opt-nosubs").checked = !!o.no_subs;
+  $("#opt-nothumbnail").checked = !!o.no_thumbnail;
+  $("#opt-nometadata").checked = !!o.no_metadata;
+  $("#opt-ytdlpargs").value = (o.ytdlp_args || []).join("\n");
 }
 
 /* The modes that download no media. Kept in step with $noMediaModes in
@@ -222,6 +264,7 @@ async function updatePreview() {
   if (opts.ytdlp_args.length) active.push(`--ytdlp-arg ×${opts.ytdlp_args.length}`);
 
   $("#opt-summary").textContent = active.length ? active.join("  ") : "defaults";
+  refreshProfileState(opts);
   try {
     $("#cmd-preview").textContent = await invoke("command_preview", { opts });
   } catch (e) {
@@ -240,6 +283,275 @@ async function updatePreview() {
 /* Run once at load so a disabled control is disabled before the first
  * interaction rather than after it. */
 applyModeConstraints();
+
+/* --------------------------------------------------------------- profiles */
+
+/* A profile is every option on the Download page EXCEPT the URL, which is
+ * why there is no list of profiled fields anywhere in this file: the profile
+ * is a RunOptions, and both sides derive it from the same struct. The one
+ * thing this needs is a canonical form to compare a saved profile against
+ * what is currently in the controls, so "modified" can be shown without
+ * asking the user to remember what they changed.
+ *
+ * "" and undefined both mean "not set" here -- an empty text box and a
+ * profile that never had a value for that field are the same state, and
+ * comparing them as different would leave a freshly applied profile showing
+ * as modified. */
+function normOpts(o) {
+  const out = {};
+  for (const k of Object.keys(o || {}).sort()) {
+    if (k === "url") continue;
+    let v = o[k];
+    if (v === "" || v === undefined) v = null;
+    out[k] = v;
+  }
+  return JSON.stringify(out);
+}
+
+function activeProfile() {
+  const name = S.profiles.active;
+  if (!name) return null;
+  return S.profiles.profiles.find((p) => p.name === name) || null;
+}
+
+/* The dropdown, the four buttons' enabled state, and the "unsaved changes"
+ * marker. Called from updatePreview, so it tracks every control that already
+ * schedules a preview -- which is all of them. */
+function refreshProfileState(opts) {
+  const active = activeProfile();
+  const modified = !!active && normOpts(opts || readOptions()) !== normOpts(active.opts);
+  $("#profile-state").textContent = modified ? "unsaved changes" : "";
+  $("#btn-profile-save").disabled = !active || !modified;
+  $("#btn-profile-revert").disabled = !active || !modified;
+  $("#btn-profile-rename").disabled = !active;
+  $("#btn-profile-delete").disabled = !active;
+}
+
+function renderProfiles() {
+  const sel = $("#profile-pick");
+  sel.innerHTML =
+    `<option value="">No profile</option>` +
+    S.profiles.profiles
+      .map((p) => `<option value="${esc(p.name)}">${esc(p.name)}</option>`)
+      .join("");
+  sel.value = S.profiles.active || "";
+  refreshProfileState();
+}
+
+function profileError(msg) {
+  const el = $("#profile-err");
+  el.hidden = !msg;
+  el.textContent = msg || "";
+}
+
+/* Save as / Rename / Delete all need one short answer from the user, and
+ * window.prompt and window.confirm are NOT available here -- a Tauri webview
+ * has no dialog implementation behind them, so they return null (or nothing
+ * at all) rather than asking. Everything that would have been a prompt is
+ * this one inline row instead. */
+let promptAction = null;
+
+function openPrompt(label, value, action) {
+  promptAction = action;
+  profileError("");
+  $("#profile-prompt-label").textContent = label;
+  const input = $("#profile-name");
+  $("#profile-prompt").hidden = false;
+  input.hidden = false;
+  input.value = value || "";
+  input.focus();
+  input.select();
+}
+
+function closePrompt() {
+  promptAction = null;
+  $("#profile-prompt").hidden = true;
+  $("#profile-name").value = "";
+}
+
+async function withStore(promise) {
+  profileError("");
+  try {
+    S.profiles = await promise;
+    renderProfiles();
+    return true;
+  } catch (e) {
+    profileError(String(e));
+    return false;
+  }
+}
+
+$("#profile-pick").addEventListener("change", async (e) => {
+  const name = e.target.value || null;
+  closePrompt();
+  if (!(await withStore(invoke("profile_activate", { name })))) return;
+  const p = activeProfile();
+  if (p) setOptions(p.opts);
+  applyModeConstraints();
+  schedulePreview();
+  schedulePathNote();
+});
+
+$("#btn-profile-save").addEventListener("click", async () => {
+  const p = activeProfile();
+  if (!p) return;
+  await withStore(invoke("profile_save", { name: p.name, opts: readOptions() }));
+});
+
+$("#btn-profile-saveas").addEventListener("click", () => {
+  openPrompt("Save these options as", "", async (name) => {
+    const existing = S.profiles.profiles.find(
+      (p) => p.name.toLowerCase() === name.trim().toLowerCase()
+    );
+    /* An overwrite is a real answer to "save as", but it should be said out
+     * loud rather than discovered afterwards. */
+    if (existing && !$("#profile-prompt").dataset.confirmOverwrite) {
+      $("#profile-prompt").dataset.confirmOverwrite = "1";
+      profileError(`"${existing.name}" already exists. Press OK again to overwrite it.`);
+      return false;
+    }
+    delete $("#profile-prompt").dataset.confirmOverwrite;
+    return withStore(invoke("profile_save", { name, opts: readOptions() }));
+  });
+});
+
+$("#btn-profile-rename").addEventListener("click", () => {
+  const p = activeProfile();
+  if (!p) return;
+  openPrompt("Rename to", p.name, (name) =>
+    withStore(invoke("profile_rename", { from: p.name, to: name }))
+  );
+});
+
+$("#btn-profile-revert").addEventListener("click", () => {
+  const p = activeProfile();
+  if (!p) return;
+  setOptions(p.opts);
+  applyModeConstraints();
+  schedulePreview();
+  schedulePathNote();
+});
+
+$("#btn-profile-delete").addEventListener("click", () => {
+  const p = activeProfile();
+  if (!p) return;
+  /* The confirmation is the prompt row with the name pre-filled: typing
+   * nothing and pressing OK deletes it, pressing Cancel does not. Same
+   * reason as above -- there is no window.confirm to call. */
+  openPrompt(`Delete "${p.name}"? Press OK to confirm.`, "", async () => {
+    const ok = await withStore(invoke("profile_delete", { name: p.name }));
+    if (ok) refreshProfileState();
+    return ok;
+  });
+  $("#profile-name").hidden = true;
+});
+
+$("#btn-profile-ok").addEventListener("click", async () => {
+  if (!promptAction) return;
+  const action = promptAction;
+  const name = $("#profile-name").value;
+  const done = await action(name);
+  if (done !== false) {
+    closePrompt();
+    $("#profile-name").hidden = false;
+    delete $("#profile-prompt").dataset.confirmOverwrite;
+  }
+});
+
+$("#btn-profile-cancel").addEventListener("click", () => {
+  closePrompt();
+  $("#profile-name").hidden = false;
+  delete $("#profile-prompt").dataset.confirmOverwrite;
+  profileError("");
+});
+
+$("#profile-name").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") $("#btn-profile-ok").click();
+  if (e.key === "Escape") $("#btn-profile-cancel").click();
+});
+
+async function loadProfiles() {
+  S.profiles = await invoke("profiles_list");
+  renderProfiles();
+  /* The profile selected when the window last closed is applied at startup,
+   * which is the whole point of remembering which one it was. */
+  const p = activeProfile();
+  if (p) {
+    setOptions(p.opts);
+    applyModeConstraints();
+  }
+}
+
+/* ------------------------------------------------------------ destinations */
+
+/* What a typed path actually resolves to, answered by check_path rather than
+ * by anything in this file: ~ expansion and archive detection are the Rust
+ * side's rules, and a second copy of them here would be a second set of
+ * rules to keep true. */
+const pathNoteTimers = {};
+
+function schedulePathNote(inputSel, noteSel) {
+  if (!inputSel) {
+    schedulePathNote("#opt-path", "#path-note");
+    return;
+  }
+  clearTimeout(pathNoteTimers[inputSel]);
+  pathNoteTimers[inputSel] = setTimeout(async () => {
+    const note = $(noteSel);
+    if (!note) return;
+    try {
+      const r = await invoke("check_path", { path: $(inputSel).value });
+      note.textContent = r.note;
+      note.classList.toggle("bad", !r.is_dir && r.exists);
+    } catch (e) {
+      note.textContent = String(e);
+      note.classList.add("bad");
+    }
+  }, 220);
+}
+
+/* Choose... hands back exactly one folder the user picked in the platform's
+ * own dialog. The window cannot enumerate a directory or construct a dialog
+ * of its own -- pick_folder is a command in main.rs, and no dialog permission
+ * is granted to this frontend. */
+async function pickInto(inputSel, noteSel) {
+  const current = $(inputSel).value.trim();
+  const start = current || (S.settings && S.settings.data_root) || null;
+  const chosen = await invoke("pick_folder", { start });
+  if (!chosen) return; /* cancelled */
+  $(inputSel).value = chosen;
+  schedulePathNote(inputSel, noteSel);
+  if (inputSel === "#opt-path") schedulePreview();
+}
+
+async function openInto(inputSel, noteSel) {
+  const note = $(noteSel);
+  try {
+    const r = await invoke("check_path", { path: $(inputSel).value });
+    await invoke("open_path", { path: r.expanded });
+  } catch (e) {
+    note.textContent = String(e);
+    note.classList.add("bad");
+  }
+}
+
+$("#btn-pick-path").addEventListener("click", () => pickInto("#opt-path", "#path-note"));
+$("#btn-open-path").addEventListener("click", () => openInto("#opt-path", "#path-note"));
+$("#opt-path").addEventListener("input", () => schedulePathNote("#opt-path", "#path-note"));
+
+$("#btn-pick-dataroot").addEventListener("click", () =>
+  pickInto("#set-dataroot", "#dataroot-note"));
+$("#btn-open-dataroot").addEventListener("click", () =>
+  openInto("#set-dataroot", "#dataroot-note"));
+$("#set-dataroot").addEventListener("input", () =>
+  schedulePathNote("#set-dataroot", "#dataroot-note"));
+
+$("#btn-pick-archiveroot").addEventListener("click", () =>
+  pickInto("#set-archiveroot", "#archiveroot-note"));
+$("#btn-open-archiveroot").addEventListener("click", () =>
+  openInto("#set-archiveroot", "#archiveroot-note"));
+$("#set-archiveroot").addEventListener("input", () =>
+  schedulePathNote("#set-archiveroot", "#archiveroot-note"));
 
 $("#url").addEventListener("keydown", (e) => {
   if (e.key === "Enter") start();
@@ -850,16 +1162,86 @@ async function verify() {
 
 /* ----------------------------------------------------------------- health */
 
-async function loadHealth() {
-  const body = $("#health-body");
-  body.innerHTML = `<div class="spinner">Checking…</div>`;
-  let h;
-  try {
-    h = await invoke("health_report");
-  } catch (e) {
-    body.innerHTML = `<div class="notice bad">${esc(e)}</div>`;
-    return;
-  }
+/* This pane used to be one command that did everything and one await that
+ * waited for all of it. Seven `--version` subprocesses, run one after
+ * another, decided when the first pixel appeared -- and pwsh and yt-dlp are
+ * the better part of a second each on their own, before a machine where one
+ * of them is on a network drive or blocked by a filter.
+ *
+ * So it is now two commands and three independent fills: the cheap half
+ * (files, config, stats, PO token state) paints immediately, the dependency
+ * probe fills its own card when it answers, and the log tail fills its own.
+ * Nothing waits for anything else, and re-entering the tab repaints from
+ * what was already fetched instead of starting over. */
+let healthRun = 0;
+
+function healthShell() {
+  $("#health-body").innerHTML = `
+    <div class="card">
+      <div class="card-head"><h2>Dependencies</h2>
+        <span class="hint" id="deps-note" style="margin:0"></span></div>
+      <div id="deps-body"><div class="spinner">Probing&hellip;</div></div>
+    </div>
+
+    <div class="card">
+      <h2>Installed pipeline files</h2>
+      <p class="hint">The repo holds the sources; the installer copies them here. Editing a file in a
+        clone has no effect on this install until it is copied over.</p>
+      <div id="installed-body"><div class="spinner">Reading&hellip;</div></div>
+    </div>
+
+    <div class="card">
+      <h2>Archive</h2>
+      <div id="stats-body"><div class="spinner">Reading&hellip;</div></div>
+    </div>
+
+    <div class="card">
+      <h2>PO token provider</h2>
+      <div id="pot-body"><div class="spinner">Reading&hellip;</div></div>
+    </div>
+
+    <div class="card">
+      <h2>yt-dlp.conf</h2>
+      <div id="config-body"><div class="spinner">Reading&hellip;</div></div>
+    </div>
+
+    <div class="card">
+      <h2>download.log (tail)</h2>
+      <pre class="blob" id="log-tail">Loading&hellip;</pre>
+    </div>`;
+}
+
+async function loadHealth(force) {
+  const run = ++healthRun;
+  healthShell();
+
+  /* Paint whatever the last visit fetched before asking for anything. */
+  if (S.health.deps) renderHealthDeps(S.health.deps);
+  if (S.health.overview) renderHealthOverview(S.health.overview);
+  if (S.health.log != null) $("#log-tail").textContent = S.health.log;
+
+  const fresh = (fn) => (v) => { if (run === healthRun) fn(v); };
+
+  $("#deps-note").textContent = S.health.deps ? "re-checking…" : "";
+  invoke("health_dependencies", { force: !!force })
+    .then(fresh((deps) => { S.health.deps = deps; renderHealthDeps(deps); }))
+    .catch(fresh((e) => { $("#deps-body").innerHTML = `<div class="notice bad">${esc(e)}</div>`; }));
+
+  invoke("health_overview")
+    .then(fresh((h) => { S.health.overview = h; renderHealthOverview(h); }))
+    .catch(fresh((e) => {
+      $("#stats-body").innerHTML = `<div class="notice bad">${esc(e)}</div>`;
+    }));
+
+  invoke("read_log", { which: "download", lines: 300 })
+    .then(fresh((r) => {
+      S.health.log = r.exists ? r.text : `${r.path} does not exist yet.`;
+      $("#log-tail").textContent = S.health.log;
+    }))
+    .catch(fresh((e) => { $("#log-tail").textContent = String(e); }));
+}
+
+function renderHealthDeps(deps) {
   const dep = (d) => `
     <tr>
       <td class="mono">${esc(d.name)}</td>
@@ -870,6 +1252,23 @@ async function loadHealth() {
       <td style="color:var(--dim)">${esc(d.note)}</td>
     </tr>`;
 
+  const note = $("#deps-note");
+  if (note) {
+    /* A tool that is on PATH but did not answer --version within the probe
+     * timeout is reported as found with no version, and saying so is the
+     * difference between "this is fine" and "something is wrong with that
+     * install". */
+    const slow = deps.filter((d) => d.found && !d.version).map((d) => d.name);
+    note.textContent = slow.length
+      ? `${slow.join(", ")}: found, but did not report a version in time`
+      : "";
+  }
+  $("#deps-body").innerHTML = `
+    <table><thead><tr><th>Tool</th><th>State</th><th>Version</th><th>Path</th><th>Why it matters</th></tr></thead>
+    <tbody>${deps.map(dep).join("")}</tbody></table>`;
+}
+
+function renderHealthOverview(h) {
   const inst = (f) => `
     <tr><td class="mono">${esc(f.name)}</td>
         <td class="${f.present ? "ok" : "no"}">${f.present ? "installed" : "missing"}</td>
@@ -877,77 +1276,59 @@ async function loadHealth() {
         <td style="color:var(--dim)">${f.modified ? esc(fmtWhen(f.modified)) : ""}</td></tr>`;
 
   const s = h.stats;
-  body.innerHTML = `
-    <div class="card">
-      <h2>Dependencies</h2>
-      <table><thead><tr><th>Tool</th><th>State</th><th>Version</th><th>Path</th><th>Why it matters</th></tr></thead>
-      <tbody>${h.dependencies.map(dep).join("")}</tbody></table>
-    </div>
 
-    <div class="card">
-      <h2>Installed pipeline files</h2>
-      <p class="hint">The repo holds the sources; the installer copies them here. Editing a file in a
-        clone has no effect on this install until it is copied over.</p>
-      <table><thead><tr><th>File</th><th>State</th><th style="text-align:right">Size</th><th>Modified</th></tr></thead>
-      <tbody>${h.installed.map(inst).join("")}</tbody></table>
-    </div>
+  $("#installed-body").innerHTML = `
+    <table><thead><tr><th>File</th><th>State</th><th style="text-align:right">Size</th><th>Modified</th></tr></thead>
+    <tbody>${h.installed.map(inst).join("")}</tbody></table>`;
 
-    <div class="card">
-      <h2>Archive</h2>
-      <div class="kv">
-        <div class="k">Data root</div><div class="v">${esc(s.data_root)}</div>
-        <div class="k">Videos indexed</div><div class="v">${fmtCount(s.videos)}</div>
-        <div class="k">Channels</div><div class="v">${fmtCount(s.channels)}</div>
-        <div class="k">Archived bytes</div><div class="v">${fmtBytes(s.total_bytes)}</div>
-        <div class="k">global_manifest.json</div><div class="v">${
-          s.global_manifest_entries == null ? "not found" : fmtCount(s.global_manifest_entries) + " entries"}</div>
-        <div class="k">archive.txt</div><div class="v">${
-          s.archive_txt_ids == null ? "not found" : fmtCount(s.archive_txt_ids) + " ids"}</div>
-        <div class="k">Archive History snapshots</div><div class="v">${fmtCount(s.history_snapshots)}</div>
-      </div>
-      <div style="margin-top:12px"><button class="quiet small" id="btn-open-logs">Open the log folder</button></div>
+  $("#stats-body").innerHTML = `
+    <div class="kv">
+      <div class="k">Data root</div><div class="v">${esc(s.data_root)}</div>
+      <div class="k">Videos indexed</div><div class="v">${fmtCount(s.videos)}</div>
+      <div class="k">Channels</div><div class="v">${fmtCount(s.channels)}</div>
+      <div class="k">Archived bytes</div><div class="v">${fmtBytes(s.total_bytes)}</div>
+      <div class="k">global_manifest.json</div><div class="v">${
+        s.global_manifest_entries == null ? "not found" : fmtCount(s.global_manifest_entries) + " entries"}</div>
+      <div class="k">archive.txt</div><div class="v">${
+        s.archive_txt_ids == null ? "not found" : fmtCount(s.archive_txt_ids) + " ids"}</div>
+      <div class="k">Archive History snapshots</div><div class="v">${fmtCount(s.history_snapshots)}</div>
     </div>
-
-    <div class="card">
-      <h2>PO token provider</h2>
-      <div class="kv">
-        <div class="k">pot-provider.ps1</div><div class="v">${h.pot.script_present ? "installed" : "missing"}</div>
-        <div class="k">Server build</div><div class="v">${h.pot.server_built ? "built" : "not built"}</div>
-        <div class="k">PID file</div><div class="v">${h.pot.pid_file ? "present" : "none"}</div>
-        <div class="k">Root</div><div class="v">${esc(h.pot.root)}</div>
-      </div>
-      ${h.pot.state ? `<pre class="blob" style="margin-top:12px">${
-        esc(JSON.stringify(h.pot.state, null, 2))}</pre>` : ""}
-      ${h.pot.log_tail ? `<h2 style="margin-top:16px">pot-server.log (tail)</h2>
-        <pre class="blob">${esc(h.pot.log_tail)}</pre>` : ""}
-    </div>
-
-    <div class="card">
-      <h2>yt-dlp.conf</h2>
-      <div class="kv">
-        <div class="k">CONFIG_VERSION</div><div class="v">${esc(h.config.config_version || "unknown")}</div>
-        <div class="k">Options set</div><div class="v">${h.config.option_count}</div>
-        <div class="k">Path</div><div class="v">${esc(h.config.path)}</div>
-      </div>
-      <p class="hint" style="margin-top:12px">Read-only here on purpose. This file is the pipeline's
-        design record as much as its configuration — several comment blocks document options that
-        were removed and must not be re-added — and CONFIG_VERSION has to be bumped by hand when it
-        changes, because both scripts record it in manifest.json and download.log.</p>
-      <pre class="blob">${esc(h.config.body || "(not installed)")}</pre>
-    </div>
-
-    <div class="card">
-      <h2>download.log (tail)</h2>
-      <pre class="blob" id="log-tail">Loading…</pre>
+    <div style="margin-top:12px">
+      <button class="quiet small" id="btn-open-logs">Open the log folder</button>
+      <button class="quiet small" id="btn-open-dataroot-health">Open the data root</button>
     </div>`;
 
+  $("#pot-body").innerHTML = `
+    <div class="kv">
+      <div class="k">pot-provider.ps1</div><div class="v">${h.pot.script_present ? "installed" : "missing"}</div>
+      <div class="k">Server build</div><div class="v">${h.pot.server_built ? "built" : "not built"}</div>
+      <div class="k">PID file</div><div class="v">${h.pot.pid_file ? "present" : "none"}</div>
+      <div class="k">Root</div><div class="v">${esc(h.pot.root)}</div>
+    </div>
+    ${h.pot.state ? `<pre class="blob" style="margin-top:12px">${
+      esc(JSON.stringify(h.pot.state, null, 2))}</pre>` : ""}
+    ${h.pot.log_tail ? `<h2 style="margin-top:16px">pot-server.log (tail)</h2>
+      <pre class="blob">${esc(h.pot.log_tail)}</pre>` : ""}`;
+
+  $("#config-body").innerHTML = `
+    <div class="kv">
+      <div class="k">CONFIG_VERSION</div><div class="v">${esc(h.config.config_version || "unknown")}</div>
+      <div class="k">Options set</div><div class="v">${h.config.option_count}</div>
+      <div class="k">Path</div><div class="v">${esc(h.config.path)}</div>
+    </div>
+    <p class="hint" style="margin-top:12px">Read-only here on purpose. This file is the pipeline's
+      design record as much as its configuration &mdash; several comment blocks document options that
+      were removed and must not be re-added &mdash; and CONFIG_VERSION has to be bumped by hand when
+      it changes, because both scripts record it in manifest.json and download.log.</p>
+    <pre class="blob">${esc(h.config.body || "(not installed)")}</pre>`;
+
   $("#btn-open-logs").addEventListener("click", () => invoke("open_path", { path: s.log_dir }));
-  invoke("read_log", { which: "download", lines: 300 })
-    .then((r) => { $("#log-tail").textContent = r.exists ? r.text : `${r.path} does not exist yet.`; })
-    .catch((e) => { $("#log-tail").textContent = String(e); });
+  $("#btn-open-dataroot-health").addEventListener("click", () =>
+    invoke("open_path", { path: s.data_root }));
 }
 
-$("#btn-health-refresh").addEventListener("click", loadHealth);
+/* Refresh means re-probe, not re-read a cached probe. */
+$("#btn-health-refresh").addEventListener("click", () => loadHealth(true));
 
 /* --------------------------------------------------------------- settings */
 
@@ -968,6 +1349,7 @@ async function loadSettings() {
 }
 
 $("#btn-save-settings").addEventListener("click", async () => {
+  const before = S.settings || {};
   const settings = {
     data_root: $("#set-dataroot").value.trim() || null,
     archive_root: $("#set-archiveroot").value.trim() || null,
@@ -975,12 +1357,30 @@ $("#btn-save-settings").addEventListener("click", async () => {
     default_workers: parseInt($("#set-workers").value, 10) || 1,
     theme: $("#set-theme").value,
   };
+  const rootsChanged =
+    (before.data_root || null) !== settings.data_root ||
+    (before.archive_root || null) !== settings.archive_root;
+
   S.settings = await invoke("set_settings", { settings });
   applyTheme(settings.theme);
   const saved = $("#settings-saved");
   saved.hidden = false;
   setTimeout(() => { saved.hidden = true; }, 1600);
   await loadLocations();
+  schedulePathNote("#set-dataroot", "#dataroot-note");
+  schedulePathNote("#set-archiveroot", "#archiveroot-note");
+  schedulePathNote("#opt-path", "#path-note");
+
+  // A new data root is a different archive. The index in memory is still the
+  // old one, so without this the Library keeps showing videos from a folder
+  // the app is no longer pointed at -- which reads as "the setting did not
+  // take" and was the most confusing part of changing it.
+  if (rootsChanged) {
+    S.library = [];
+    S.health.overview = null;
+    refreshLibrary(false);
+  }
+
   // The allow_transcode change only takes effect for playback decisions on the
   // next launch: media::Media reads it once at construction. Said plainly here
   // rather than pretending the toggle is live.
@@ -1002,6 +1402,16 @@ async function loadLocations() {
 (async function init() {
   await loadSettings();
   await loadLocations();
+  // After loadSettings, so a profile's own workers value wins over the
+  // default_workers setting that seeds the same control.
+  try {
+    await loadProfiles();
+  } catch (e) {
+    profileError(String(e));
+  }
+  schedulePathNote("#opt-path", "#path-note");
+  schedulePathNote("#set-dataroot", "#dataroot-note");
+  schedulePathNote("#set-archiveroot", "#archiveroot-note");
   const snap = await invoke("runner_snapshot");
   S.queue = snap.queue || [];
   S.current = snap.current || null;
