@@ -78,6 +78,15 @@ $RepoRaw = "https://raw.githubusercontent.com/AviMehandru/yt-dlp-download-app/ma
 # Every file the app is built from. Keep in sync with the repo tree; a
 # file missing here simply is not fetched in the no-checkout mode, and the
 # build then fails on a missing module rather than on anything obvious.
+#
+# That failure mode is not hypothetical. profiles.rs was added to the crate
+# and never added here, so every no-checkout install from that commit until
+# this one fetched a source tree that cannot compile -- `cargo build` stops
+# at "file not found for module `profiles`", naming a file the user never
+# knew was supposed to exist. A checkout install was unaffected, which is
+# why it went unnoticed: the mode that is tested is not the mode that broke.
+#
+# Adding a module to src-tauri/src means adding a line here.
 $SourceFiles = @(
     "src/index.html",
     "src/app.css",
@@ -93,6 +102,7 @@ $SourceFiles = @(
     "src-tauri/src/archive.rs",
     "src-tauri/src/media.rs",
     "src-tauri/src/health.rs",
+    "src-tauri/src/profiles.rs",
     "src-tauri/icons/32x32.png",
     "src-tauri/icons/128x128.png",
     "src-tauri/icons/128x128@2x.png",
