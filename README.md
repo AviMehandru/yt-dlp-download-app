@@ -1,7 +1,7 @@
 # ytdl-gui
 
 A desktop front end for the [yt-dlp archival
-pipeline](https://github.com/AviMehandru/yt-dlp-download-automator): start
+pipeline](https://github.com/AviMehandru/orchid-ochre): start
 downloads and watch them, queue several, read the run history, browse the
 archive, and check the health of the pipeline underneath.
 

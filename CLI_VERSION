@@ -11,7 +11,7 @@
 # both bash and PowerShell can parse it without a library.
 
 # Where the pipeline lives.
-CLI_REPO=AviMehandru/yt-dlp-download-automator
+CLI_REPO=AviMehandru/orchid-ochre
 
 # Which ref of it to install. A TAG is the point of this file; `main` means
 # "whatever was pushed most recently", which is exactly the version skew

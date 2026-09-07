@@ -5,7 +5,7 @@
 # TWO PHASES, and the split is the whole architecture:
 #
 #   Phase 1  installs the PIPELINE, by downloading and running the
-#            yt-dlp-download-automator installer at the ref pinned in
+#            orchid-ochre installer at the ref pinned in
 #            CLI_VERSION. This repo does not contain a copy of the
 #            pipeline and never should: a vendored copy is a copy that
 #            drifts, and the GUI's entire relationship with the pipeline

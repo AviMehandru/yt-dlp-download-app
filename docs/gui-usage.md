@@ -53,7 +53,7 @@ This repo installs **both halves**. `setup.sh` (Linux and macOS) or
 `setup.ps1` (Windows) runs in two phases:
 
 - **Phase 1** installs the pipeline, by downloading and running the
-  `yt-dlp-download-automator` installer at the ref pinned in `CLI_VERSION`.
+  `orchid-ochre` installer at the ref pinned in `CLI_VERSION`.
   This repo carries no copy of the pipeline; the GUI shells out to the
   installed `ytdl` and reads the archive `postprocess.ps1` writes.
 - **Phase 2** builds this app and puts `ytdl-gui` on PATH.

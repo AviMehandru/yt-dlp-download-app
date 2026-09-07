@@ -6,7 +6,7 @@
     The Windows counterpart of setup.sh, and the same two phases:
 
       Phase 1  installs the PIPELINE, by downloading and running the
-               yt-dlp-download-automator installer at the ref pinned in
+               orchid-ochre installer at the ref pinned in
                CLI_VERSION. This repo carries no copy of the pipeline;
                the GUI shells out to the installed `ytdl` and reads the
                archive `postprocess.ps1` writes.
